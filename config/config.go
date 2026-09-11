@@ -65,7 +65,7 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		AppEnv:               getEnv("APP_ENV", "development"),
-		Port:                 getEnv("API_PORT", "3001"),
+		Port: 				  getEnv("PORT", getEnv("API_PORT", "3001")),
 		DatabaseURL:          os.Getenv("DATABASE_URL"),
 		RedisURL:             getEnv("REDIS_URL", "redis://localhost:6379"),
 		AutoMigrate: 		  getEnvBool("DB_AUTO_MIGRATE", false),
