@@ -34,7 +34,6 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	authGroup.POST("/token", h.Admin.RefreshToken, auth, middleware.LogActivity(activityUsecase, "refresh_token", "auth"))
 	authGroup.POST("/logout", h.Admin.Logout)
 	authGroup.POST("/logout-all", h.Admin.LogoutAll)
-	authGroup.GET("/profile", h.Member.GetProfile, auth, middleware.LogActivity(activityUsecase, "view_profile", "auth"))
 
 	// ---- Admin routes (admin.route.js) ----
 	adminGroup := api.Group("/admin")
@@ -43,6 +42,7 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	// ---- Member routes (member.route.js) ----
 	memberGroup := api.Group("/members")
 	memberGroup.GET("", h.Member.GetAll, auth)
+	authGroup.GET("/profile", h.Member.GetProfile, auth, middleware.LogActivity(activityUsecase, "view_profile", "auth"))
 	memberGroup.GET("/:id", h.Member.GetByID, auth, middleware.RequireRole(domain.RoleAdmin))
 	memberGroup.POST("/pin", h.Member.SetPin, auth, middleware.LogActivity(activityUsecase, "set_pin", "member"))
 	memberGroup.POST("/:member_id/reset-pin", h.Member.SetPinByAdmin, auth, middleware.RequireRole(domain.RoleAdmin))
@@ -55,7 +55,7 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	paymentGroup.GET("/count", h.Payment.Count, auth, middleware.LogActivity(activityUsecase, "count_payment", "payment"))
 	paymentGroup.GET("/pending", h.Payment.GetPending, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
 	paymentGroup.GET("/unpaid", h.Payment.ListUnpaid, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
-	paymentGroup.GET("/status", h.Payment.GetStatus, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
+	paymentGroup.GET("/paid-status", h.Payment.GetStatus, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
 	paymentGroup.POST("/:id/approve", h.Payment.Approve, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
 	paymentGroup.POST("/:id/reject", h.Payment.Reject, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
 	paymentGroup.POST("/admin-create", h.Payment.CreateByAdmin, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
@@ -73,7 +73,7 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	analyticsGroup := api.Group("/analytics")
 	analyticsGroup.GET("/wau", h.Activity.GetWAU, auth, middleware.RequireRole(domain.RoleAdmin))
 	analyticsGroup.GET("/action", h.Activity.GetActivityByMember, auth, middleware.RequireRole(domain.RoleAdmin))
-	analyticsGroup.GET("/log", h.Activity.GetActivityLog, auth, middleware.RequireRole(domain.RoleAdmin))
+	analyticsGroup.GET("/logs", h.Activity.GetActivityLog, auth, middleware.RequireRole(domain.RoleAdmin))
 
 	// ---- Health check ----
 	e.GET("/health", func(c echo.Context) error {
