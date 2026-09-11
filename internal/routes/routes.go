@@ -42,7 +42,7 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	// ---- Member routes (member.route.js) ----
 	memberGroup := api.Group("/members")
 	memberGroup.GET("", h.Member.GetAll, auth)
-	authGroup.GET("/profile", h.Member.GetProfile, auth, middleware.LogActivity(activityUsecase, "view_profile", "auth"))
+	memberGroup.GET("/profile", h.Member.GetProfile, auth, middleware.LogActivity(activityUsecase, "view_profile", "auth"))
 	memberGroup.GET("/:id", h.Member.GetByID, auth, middleware.RequireRole(domain.RoleAdmin))
 	memberGroup.POST("/pin", h.Member.SetPin, auth, middleware.LogActivity(activityUsecase, "set_pin", "member"))
 	memberGroup.POST("/:member_id/reset-pin", h.Member.SetPinByAdmin, auth, middleware.RequireRole(domain.RoleAdmin))
