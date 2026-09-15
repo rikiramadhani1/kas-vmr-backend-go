@@ -13,14 +13,13 @@ import (
 )
 
 type MemberHandler struct {
-	memberUsecase *usecase.MemberUsecase
-	adminUsecase  *usecase.AdminUsecase
+	memberUsecase       *usecase.MemberUsecase
+	adminUsecase        *usecase.AdminUsecase
 	notificationUsecase *usecase.NotificationUsecase
-	vapidPublicKey string
 }
 
-func NewMemberHandler(memberUsecase *usecase.MemberUsecase, adminUsecase *usecase.AdminUsecase, notificationUsecase *usecase.NotificationUsecase, vapidPublicKey string) *MemberHandler {
-	return &MemberHandler{memberUsecase: memberUsecase, adminUsecase: adminUsecase, notificationUsecase: notificationUsecase, vapidPublicKey: vapidPublicKey}
+func NewMemberHandler(memberUsecase *usecase.MemberUsecase, adminUsecase *usecase.AdminUsecase, notificationUsecase *usecase.NotificationUsecase) *MemberHandler {
+	return &MemberHandler{memberUsecase: memberUsecase, adminUsecase: adminUsecase, notificationUsecase: notificationUsecase}
 }
 
 // Login handles POST /api/auth (member login by phone + PIN).
@@ -139,6 +138,13 @@ func (h *MemberHandler) GetProfile(c echo.Context) error {
 	return response.Error(c, "Unauthorized", 401)
 }
 
+// GetPushPublicKey handles GET /api/members/push-public-key - public
+// (no auth) so the FE can fetch the VAPID public key before subscribing.
+func (h *MemberHandler) GetPushPublicKey(c echo.Context) error {
+	return response.Success(c, "OK", map[string]string{"publicKey": h.notificationUsecase.PublicKey()})
+}
+
+// SubscribePush handles POST /api/members/push-subscribe.
 func (h *MemberHandler) SubscribePush(c echo.Context) error {
 	var req dto.SubscribePushRequest
 	if err := c.Bind(&req); err != nil {
@@ -147,16 +153,30 @@ func (h *MemberHandler) SubscribePush(c echo.Context) error {
 	if err := c.Validate(&req); err != nil {
 		return response.Error(c, err.Error(), 400)
 	}
+
 	memberID, ok := middleware.GetUserID(c)
 	if !ok {
 		return response.Error(c, "Unauthorized", 401)
 	}
+
 	if err := h.notificationUsecase.Subscribe(c.Request().Context(), memberID, req.Endpoint, req.Keys.P256dh, req.Keys.Auth); err != nil {
 		return response.FromError(c, err)
 	}
 	return response.Success(c, "Berhasil subscribe notifikasi", nil)
 }
 
-func (h *MemberHandler) GetPushPublicKey(c echo.Context) error {
-	return response.Success(c, "OK", map[string]string{"publicKey": h.vapidPublicKey})
+// UnsubscribePush handles POST /api/members/push-unsubscribe.
+func (h *MemberHandler) UnsubscribePush(c echo.Context) error {
+	var req dto.UnsubscribePushRequest
+	if err := c.Bind(&req); err != nil {
+		return response.Error(c, "Payload tidak valid", 400)
+	}
+	if err := c.Validate(&req); err != nil {
+		return response.Error(c, err.Error(), 400)
+	}
+
+	if err := h.notificationUsecase.Unsubscribe(c.Request().Context(), req.Endpoint); err != nil {
+		return response.FromError(c, err)
+	}
+	return response.Success(c, "Berhasil unsubscribe notifikasi", nil)
 }

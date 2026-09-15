@@ -59,6 +59,7 @@ func RunMigrations(db *gorm.DB) error {
 		&domain.LogSignTf{},
 		&domain.WeeklySummary{},
 		&domain.EmailTransactionLog{},
+		&domain.Transaksi{},
 		&domain.PushSubscription{},
 	)
 	if err != nil {

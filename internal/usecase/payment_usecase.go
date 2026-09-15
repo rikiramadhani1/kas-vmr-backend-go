@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -17,10 +18,9 @@ import (
 )
 
 type CountPaymentDTO struct {
-	Unpaid      int      `json:"unpaid"`
-	Pending     int      `json:"pending"`
-	MonthsDue   []string `json:"monthsDue"`
-	Overpayment int      `json:"overpayment"`
+	Unpaid    int      `json:"unpaid"`
+	MonthsDue []string `json:"monthsDue"`
+	PaidUntil *string  `json:"paidUntil,omitempty"`
 }
 
 type UnpaidMemberDTO struct {
@@ -35,32 +35,25 @@ type PaymentStatusDTO struct {
 	MemberID    uint    `json:"memberId"`
 	Name        string  `json:"name"`
 	HouseNumber *string `json:"house_number,omitempty"`
-	PaidUntil   string  `json:"paidUntil"`
+	PaidUntil   *string `json:"paidUntil"`
 }
 
-type CreatePaymentResult struct {
-	Nominal  float64          `json:"nominal"`
-	Months   int              `json:"months"`
-	Payments []domain.Payment `json:"payments"`
-}
-
-type ApprovePaymentResult struct {
-	Payment *domain.Payment `json:"payment"`
-	Message string          `json:"message"`
+type RecordTransactionResult struct {
+	Transaksi *domain.Transaksi `json:"transaksi"`
+	Months    int               `json:"months"`
+	PaidUntil string            `json:"paidUntil"`
 }
 
 // PaymentUsecase holds a raw *gorm.DB (in addition to the "read" repos) so
-// it can open explicit transactions for the operations that need to
-// atomically touch both `payments` and `cash_flows` - fixing the
-// non-atomic create/approve flows in the original Node.js code, where a
-// crash partway through could leave a payment recorded without its
-// corresponding cash flow entry (or vice versa).
+// it can open explicit transactions for RecordTransaction, which
+// atomically touches `transaksis`, `payments` (the cursor), and
+// `cash_flows` together.
 type PaymentUsecase struct {
-	db            *gorm.DB
-	paymentRepo   repository.PaymentRepository
-	cashFlowRepo  repository.CashFlowRepository
-	memberRepo    repository.MemberRepository
-	logSignTfRepo repository.LogSignTfRepository
+	db                  *gorm.DB
+	paymentRepo         repository.PaymentRepository
+	transaksiRepo       repository.TransaksiRepository
+	cashFlowRepo        repository.CashFlowRepository
+	memberRepo          repository.MemberRepository
 	notificationUsecase *NotificationUsecase
 
 	amountPerMonth       float64
@@ -72,9 +65,9 @@ type PaymentUsecase struct {
 func NewPaymentUsecase(
 	db *gorm.DB,
 	paymentRepo repository.PaymentRepository,
+	transaksiRepo repository.TransaksiRepository,
 	cashFlowRepo repository.CashFlowRepository,
 	memberRepo repository.MemberRepository,
-	logSignTfRepo repository.LogSignTfRepository,
 	notificationUsecase *NotificationUsecase,
 	amountPerMonth float64,
 	defaultStartMonth, defaultStartYear int,
@@ -83,9 +76,9 @@ func NewPaymentUsecase(
 	return &PaymentUsecase{
 		db:                   db,
 		paymentRepo:          paymentRepo,
+		transaksiRepo:        transaksiRepo,
 		cashFlowRepo:         cashFlowRepo,
 		memberRepo:           memberRepo,
-		logSignTfRepo:        logSignTfRepo,
 		notificationUsecase:  notificationUsecase,
 		amountPerMonth:       amountPerMonth,
 		defaultStartMonth:    defaultStartMonth,
@@ -98,229 +91,215 @@ func (u *PaymentUsecase) description(month, year int) string {
 	return fmt.Sprintf("Iuran bulan %s %d", MonthNameID(month), year)
 }
 
-// CreatePaymentRequest lets a member request to pay `n` upcoming months
-// (as *pending* payments, awaiting admin approval).
+// RecordTransaction is THE single entry point for booking a member's
+// dues payment, regardless of how the money was detected: OCR upload
+// (source=upload), the email auto-confirm worker (source=email,
+// referenceNumber set), or a manual admin entry (source=admin). It:
 //
-// The original Node.js version had a hardcoded `if (member_id > 15) throw`
-// guard here - almost certainly a leftover sanity check from early
-// development/seed data that would break as soon as membership grew past
-// 15 people. We replace it with a real check: the member must actually
-// exist and be active.
-func (u *PaymentUsecase) CreatePaymentRequest(ctx context.Context, memberID uint, n int) ([]domain.Payment, error) {
-	member, err := u.memberRepo.FindByID(ctx, memberID)
-	if err != nil {
-		return nil, err
+//  1. Rejects the transaction as a duplicate if a transaction for the
+//     same member, same amount, on the same calendar day already exists
+//     (see TransaksiRepository.FindDuplicate) - this is what prevents a
+//     transfer from being counted twice when it's picked up by BOTH the
+//     email watcher and a member's manual proof upload.
+//  2. Validates the amount is a whole multiple of the configured dues
+//     amount.
+//  3. Atomically (single DB transaction): records the Transaksi row,
+//     advances the member's Payment cursor by however many months the
+//     amount covers, and books each of those months into cash flow
+//     (upserting by month description, with future months' CreatedAt set
+//     to the 1st of that month rather than "now" - see
+//     CashFlowRepository.UpsertByDescription).
+//  4. Sends a push notification to the member once everything has
+//     committed successfully.
+func (u *PaymentUsecase) RecordTransaction(ctx context.Context, memberID uint, amount float64, source string, referenceNumber *string, transactionDate time.Time) (*RecordTransactionResult, error) {
+	if u.amountPerMonth <= 0 {
+		return nil, response.NewAPIError(500, "IURAN_AMOUNT tidak valid")
 	}
-	if member == nil || member.Status != domain.MemberStatusActive {
-		return nil, response.NewAPIError(400, "Member tidak ditemukan atau tidak aktif")
+	if int64(amount)%int64(u.amountPerMonth) != 0 {
+		return nil, response.NewAPIError(400, fmt.Sprintf("nominal harus kelipatan %.0f", u.amountPerMonth))
+	}
+	months := int(amount / u.amountPerMonth)
+	if months <= 0 {
+		return nil, response.NewAPIError(400, "nominal tidak valid")
 	}
 
-	pending, err := u.paymentRepo.FindPendingByMemberID(ctx, memberID)
+	// Duplicate check happens BEFORE opening the booking transaction -
+	// it's a read-only guard, not something that needs the same
+	// atomicity/locking as the booking itself.
+	dup, err := u.transaksiRepo.FindDuplicate(ctx, memberID, amount, transactionDate)
 	if err != nil {
+		log.Printf("[RecordTransaction] FindDuplicate ERROR: %v", err)
 		return nil, err
 	}
-	if len(pending) > 0 {
-		months := make([]string, 0, len(pending))
-		for _, p := range pending {
-			months = append(months, fmt.Sprintf("%d/%d", p.Month, p.Year))
+	if dup != nil {
+		return nil, response.NewAPIError(409, fmt.Sprintf(
+			"Transaksi dengan nominal Rp%.0f pada tanggal %s sepertinya sudah tercatat sebelumnya (sumber: %s). Kalau ini keliru, silakan hubungi admin.",
+			amount, transactionDate.Format("02-01-2006"), dup.Source))
+	}
+
+	var result *RecordTransactionResult
+
+	err = u.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		paymentRepo := repository.NewPaymentRepository(tx)
+		cashFlowRepo := repository.NewCashFlowRepository(tx)
+		transaksiRepo := repository.NewTransaksiRepository(tx)
+
+		cursor, err := paymentRepo.FindByMemberIDForUpdate(ctx, memberID)
+		if err != nil {
+			log.Printf("[RecordTransaction] FindByMemberIDForUpdate ERROR: %v", err)
+			return err
 		}
-		return nil, response.NewAPIError(400, fmt.Sprintf(
-			"Kamu masih memiliki pembayaran pending (Bulan: %v). Silakan tunggu hingga disetujui atau dibatalkan.", months))
-	}
 
-	last, err := u.paymentRepo.FindLastByMemberID(ctx, memberID)
+		hasPaid := cursor != nil && cursor.HasPaidAnything()
+		fromMonth, fromYear := 0, 0
+		if hasPaid {
+			fromMonth, fromYear = cursor.PaidUntilMonth, cursor.PaidUntilYear
+		}
+
+		newMonth, newYear, paidMonths := AdvanceMonths(hasPaid, fromMonth, fromYear, u.defaultStartMonth, u.defaultStartYear, months)
+
+		if err := paymentRepo.AdvanceCursor(ctx, memberID, newMonth, newYear); err != nil {
+			log.Printf("[RecordTransaction] AdvanceCursor ERROR: %v", err)
+			return err
+		}
+
+		for _, my := range paidMonths {
+			desc := u.description(my.Month, my.Year)
+			forDate := time.Date(my.Year, time.Month(my.Month), 1, 0, 0, 0, 0, time.UTC)
+			if _, err := cashFlowRepo.UpsertByDescription(ctx, domain.CashFlowTypeIn, domain.CashFlowSourceDues, desc, u.amountPerMonth, forDate); err != nil {
+				return err
+			}
+		}
+
+		t := &domain.Transaksi{
+			MemberID:        memberID,
+			Amount:          amount,
+			Months:          months,
+			Source:          source,
+			ReferenceNumber: referenceNumber,
+			TransactionDate: transactionDate,
+		}
+		if err := transaksiRepo.Create(ctx, t); err != nil {
+			return err
+		}
+
+		result = &RecordTransactionResult{
+			Transaksi: t,
+			Months:    months,
+			PaidUntil: fmt.Sprintf("%s %d", MonthNameID(newMonth), newYear),
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	startMonth, startYear := u.defaultStartMonth, u.defaultStartYear
-	if last != nil {
-		startMonth = last.Month + 1
-		startYear = last.Year
-		if startMonth > 12 {
-			startMonth = 1
-			startYear++
-		}
-	}
-
-	monthsToPay := []domain.MonthYear{{Month: startMonth, Year: startYear}}
-	monthsToPay = append(monthsToPay, NextMonthsAfter(startMonth, startYear, n-1)...)
-
-	payments := make([]domain.Payment, 0, n)
-	for _, my := range monthsToPay {
-		payments = append(payments, domain.Payment{
-			MemberID: memberID,
-			Month:    my.Month,
-			Year:     my.Year,
-			Amount:   u.amountPerMonth,
-			Status:   domain.PaymentStatusPending,
+	// Push notification happens AFTER the transaction commits - sending
+	// it from inside the closure above would risk telling the member
+	// "sudah tercatat" for a booking that then gets rolled back by a
+	// later error in the same transaction.
+	if u.notificationUsecase != nil {
+		go u.notificationUsecase.SendToMember(context.Background(), memberID, PushPayload{
+			Title: "Pembayaran Kas Berhasil",
+			Body: fmt.Sprintf(
+				"Terima kasih! Pembayaran kas untuk %d bulan sudah tercatat, lunas sampai %s.",
+				result.Months, result.PaidUntil,
+			),
 		})
 	}
 
-	if err := u.paymentRepo.CreateMany(ctx, payments); err != nil {
-		return nil, err
-	}
-	return payments, nil
+	return result, nil
 }
 
-// GetAllByPhone resolves phone -> member (via the shared, single
-// normalization rule in pkg/phoneutil - see FindByPhoneOrSpouse) and
-// returns their 5 most recent payments. Equivalent to the original
-// getAllPaymentsService -> repo.getTransaksiTerakhirByPhone(phone).
-func (u *PaymentUsecase) GetAllByPhone(ctx context.Context, phone string) ([]domain.Payment, error) {
+// CreateByAdmin lets an admin directly record a payment (e.g. cash
+// handed in person) - a thin wrapper over RecordTransaction with
+// source=admin and today as the transaction date.
+func (u *PaymentUsecase) CreateByAdmin(ctx context.Context, memberID uint, nominal float64) (*RecordTransactionResult, error) {
+	return u.RecordTransaction(ctx, memberID, nominal, domain.TransaksiSourceAdmin, nil, time.Now().UTC())
+}
+
+// GetRecentByMemberID returns a member's most recent transactions
+// (default 5) - equivalent to the original "riwayat pembayaran" list,
+// now backed by the Transaksi table instead of per-month Payment rows.
+func (u *PaymentUsecase) GetRecentByMemberID(ctx context.Context, memberID uint, limit int) ([]domain.Transaksi, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	return u.transaksiRepo.FindLatestByMemberID(ctx, memberID, limit)
+}
+
+// GetRecentByPhone resolves phone -> member (via the shared
+// phoneutil-normalized lookup) then returns their recent transactions.
+func (u *PaymentUsecase) GetRecentByPhone(ctx context.Context, phone string, limit int) ([]domain.Transaksi, error) {
 	member, err := u.memberRepo.FindByPhoneOrSpouse(ctx, phone)
 	if err != nil {
 		return nil, err
 	}
 	if member == nil {
-		return []domain.Payment{}, nil
+		return []domain.Transaksi{}, nil
 	}
-	return u.paymentRepo.FindLatestByMemberID(ctx, member.ID, 5)
+	return u.GetRecentByMemberID(ctx, member.ID, limit)
 }
 
-func (u *PaymentUsecase) GetPending(ctx context.Context) ([]domain.Payment, error) {
-	return u.paymentRepo.FindPending(ctx)
-}
-
-func (u *PaymentUsecase) GetAll(ctx context.Context) ([]domain.Payment, error) {
-	return u.paymentRepo.FindAll(ctx)
-}
-
-// ApprovePayment approves a pending payment and books it into the cash
-// flow, atomically.
-//
-// The original Node.js implementation did this as two independent
-// operations (update payment status, then separately read-modify-write
-// the matching CashFlow row) with no transaction and no row locking.
-// Under concurrent approvals of two payments for the same month, both
-// could read the same "existing amount" before either write lands,
-// causing one update to silently overwrite the other (a lost update).
-// Wrapping both steps in a single serializable-ish transaction with a
-// `SELECT ... FOR UPDATE` lock (see CashFlowRepository.UpsertByDescription)
-// closes that gap.
-func (u *PaymentUsecase) ApprovePayment(ctx context.Context, id uint) (*ApprovePaymentResult, error) {
-	var result *ApprovePaymentResult
-
-	err := u.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		paymentRepo := repository.NewPaymentRepository(tx)
-		cashFlowRepo := repository.NewCashFlowRepository(tx)
-
-		payment, err := paymentRepo.FindByIDForUpdate(ctx, id)
-		if err != nil {
-			return err
-		}
-		if payment == nil {
-			return response.NewAPIError(404, "Payment not found")
-		}
-		if payment.Status != domain.PaymentStatusPending {
-			return response.NewAPIError(400, "Payment already processed")
-		}
-
-		if err := paymentRepo.UpdateStatus(ctx, id, domain.PaymentStatusApproved); err != nil {
-			return err
-		}
-
-		desc := u.description(payment.Month, payment.Year)
-		if _, err := cashFlowRepo.UpsertByDescription(ctx, domain.CashFlowTypeIn, domain.CashFlowSourceDues, desc, payment.Amount); err != nil {
-			return err
-		}
-
-		payment.Status = domain.PaymentStatusApproved
-		result = &ApprovePaymentResult{Payment: payment, Message: "Payment approved and cash flow recorded/updated"}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-func (u *PaymentUsecase) RejectPayment(ctx context.Context, id uint) (*ApprovePaymentResult, error) {
-	var result *ApprovePaymentResult
-
-	err := u.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		paymentRepo := repository.NewPaymentRepository(tx)
-
-		payment, err := paymentRepo.FindByIDForUpdate(ctx, id)
-		if err != nil {
-			return err
-		}
-		if payment == nil {
-			return response.NewAPIError(404, "Payment not found")
-		}
-		if payment.Status != domain.PaymentStatusPending {
-			return response.NewAPIError(400, "Payment already processed")
-		}
-
-		if err := paymentRepo.UpdateStatus(ctx, id, domain.PaymentStatusRejected); err != nil {
-			return err
-		}
-
-		payment.Status = domain.PaymentStatusRejected
-		result = &ApprovePaymentResult{Payment: payment, Message: "Payment rejected"}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-// CountPayment reports how many months a member owes, using the single
-// shared CalculateUnpaidMonths function (see dues.go) instead of the
-// separate, less-accurate arithmetic the original countPaymentService used.
+// CountPayment reports how many months a member currently owes.
 func (u *PaymentUsecase) CountPayment(ctx context.Context, memberID uint) (*CountPaymentDTO, error) {
-	approved, err := u.paymentRepo.FindApprovedByMemberID(ctx, memberID)
+	cursor, err := u.paymentRepo.FindByMemberID(ctx, memberID)
 	if err != nil {
 		return nil, err
 	}
-	pending, err := u.paymentRepo.FindPendingByMemberID(ctx, memberID)
-	if err != nil {
-		return nil, err
+
+	hasPaid := cursor != nil && cursor.HasPaidAnything()
+	cursorMonth, cursorYear := 0, 0
+	if hasPaid {
+		cursorMonth, cursorYear = cursor.PaidUntilMonth, cursor.PaidUntilYear
 	}
 
 	now := jakartaNow()
-	unpaid, lastPaid := CalculateUnpaidMonths(approved, u.defaultStartMonth, u.defaultStartYear, now)
+	unpaid := CalculateUnpaidMonths(hasPaid, cursorMonth, cursorYear, u.defaultStartMonth, u.defaultStartYear, now)
 
 	monthsDue := make([]string, 0, len(unpaid))
 	for _, my := range unpaid {
 		monthsDue = append(monthsDue, fmt.Sprintf("%s %d", MonthNameID(my.Month), my.Year))
 	}
 
-	overpayment := 0
-	if lastPaid != nil {
-		totalPaidMonths := lastPaid.Year*12 + lastPaid.Month
-		totalCurrentMonths := now.Year()*12 + int(now.Month())
-		if diff := totalPaidMonths - totalCurrentMonths; diff > 0 {
-			overpayment = diff
-		}
+	dto := &CountPaymentDTO{Unpaid: len(unpaid), MonthsDue: monthsDue}
+	if hasPaid {
+		paidUntil := fmt.Sprintf("%s %d", MonthNameID(cursorMonth), cursorYear)
+		dto.PaidUntil = &paidUntil
 	}
-
-	return &CountPaymentDTO{
-		Unpaid:      len(unpaid),
-		Pending:     len(pending),
-		MonthsDue:   monthsDue,
-		Overpayment: overpayment,
-	}, nil
+	return dto, nil
 }
 
 // FindUnpaidMembers lists every active member with at least one unpaid
-// month, using the same unified calculation as CountPayment.
+// month.
 func (u *PaymentUsecase) FindUnpaidMembers(ctx context.Context) ([]UnpaidMemberDTO, error) {
 	members, err := u.memberRepo.FindAllActive(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	cursors, err := u.paymentRepo.FindAllActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cursorByMember := make(map[uint]domain.Payment, len(cursors))
+	for _, c := range cursors {
+		cursorByMember[c.MemberID] = c
+	}
+
 	now := jakartaNow()
 	result := make([]UnpaidMemberDTO, 0)
 
 	for _, m := range members {
-		approved, err := u.paymentRepo.FindApprovedByMemberID(ctx, m.ID)
-		if err != nil {
-			return nil, err
+		cursor, hasPaid := cursorByMember[m.ID]
+		hasPaid = hasPaid && cursor.HasPaidAnything()
+
+		cursorMonth, cursorYear := 0, 0
+		if hasPaid {
+			cursorMonth, cursorYear = cursor.PaidUntilMonth, cursor.PaidUntilYear
 		}
-		unpaid, _ := CalculateUnpaidMonths(approved, u.defaultStartMonth, u.defaultStartYear, now)
+
+		unpaid := CalculateUnpaidMonths(hasPaid, cursorMonth, cursorYear, u.defaultStartMonth, u.defaultStartYear, now)
 		if len(unpaid) == 0 {
 			continue
 		}
@@ -342,148 +321,58 @@ func (u *PaymentUsecase) FindUnpaidMembers(ctx context.Context) ([]UnpaidMemberD
 	return result, nil
 }
 
-// FindPaymentStatus mengembalikan member yang sudah lunas sampai bulan
-// berjalan (kebalikan dari FindUnpaidMembers), pakai kalkulasi yang sama
-// (CalculateUnpaidMonths) biar konsisten - member yang belum pernah bayar
-// sama sekali di-skip di sini (mereka sudah muncul di FindUnpaidMembers).
+// FindPaymentStatus lists every active member who HAS paid up to the
+// current month (the counterpart to FindUnpaidMembers) - members who
+// have never paid, or who are behind, are excluded here (they show up
+// in FindUnpaidMembers instead).
 func (u *PaymentUsecase) FindPaymentStatus(ctx context.Context) ([]PaymentStatusDTO, error) {
 	members, err := u.memberRepo.FindAllActive(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	cursors, err := u.paymentRepo.FindAllActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cursorByMember := make(map[uint]domain.Payment, len(cursors))
+	for _, c := range cursors {
+		cursorByMember[c.MemberID] = c
+	}
+
 	now := jakartaNow()
 	result := make([]PaymentStatusDTO, 0)
 
 	for _, m := range members {
-		approved, err := u.paymentRepo.FindApprovedByMemberID(ctx, m.ID)
-		if err != nil {
-			return nil, err
-		}
-
-		unpaid, lastPaid := CalculateUnpaidMonths(approved, u.defaultStartMonth, u.defaultStartYear, now)
-		if lastPaid == nil || len(unpaid) > 0 {
+		cursor, ok := cursorByMember[m.ID]
+		hasPaid := ok && cursor.HasPaidAnything()
+		if !hasPaid {
 			continue
 		}
 
+		unpaid := CalculateUnpaidMonths(true, cursor.PaidUntilMonth, cursor.PaidUntilYear, u.defaultStartMonth, u.defaultStartYear, now)
+		if len(unpaid) > 0 {
+			continue // masih nunggak, biar muncul di FindUnpaidMembers aja
+		}
+
+		paidUntil := fmt.Sprintf("%s %d", MonthNameID(cursor.PaidUntilMonth), cursor.PaidUntilYear)
 		result = append(result, PaymentStatusDTO{
 			MemberID:    m.ID,
 			Name:        m.Name,
 			HouseNumber: m.HouseNumber,
-			PaidUntil:   fmt.Sprintf("%s %d", MonthNameID(lastPaid.Month), lastPaid.Year),
+			PaidUntil:   &paidUntil,
 		})
 	}
 
 	return result, nil
 }
 
-// CreatePaymentByAdmin lets an admin directly record an approved payment
-// for a member (e.g. cash handed in person), optionally with a signature
-// hash if it originated from a proof image.
-func (u *PaymentUsecase) CreatePaymentByAdmin(ctx context.Context, memberID uint, nominal float64, sign string) (*CreatePaymentResult, error) {
-	if u.amountPerMonth <= 0 {
-		return nil, response.NewAPIError(500, "IURAN_AMOUNT tidak valid")
-	}
-	if int64(nominal)%int64(u.amountPerMonth) != 0 {
-		return nil, response.NewAPIError(400, fmt.Sprintf("nominal harus kelipatan %.0f", u.amountPerMonth))
-	}
-	months := int(nominal / u.amountPerMonth)
-
-	var result *CreatePaymentResult
-	err := u.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		paymentRepo := repository.NewPaymentRepository(tx)
-		cashFlowRepo := repository.NewCashFlowRepository(tx)
-		logSignRepo := repository.NewLogSignTfRepository(tx)
-
-		payments, err := u.createApprovedPaymentsTx(ctx, paymentRepo, cashFlowRepo, memberID, months)
-		if err != nil {
-			return err
-		}
-
-		if sign != "" {
-			if err := logSignRepo.Create(ctx, memberID, nominal, sign); err != nil {
-				return err
-			}
-		}
-
-		result = &CreatePaymentResult{Nominal: nominal, Months: months, Payments: payments}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Kirim push notif SETELAH transaksi sukses commit - kalau ditaro di
-	// dalam closure di atas, member bisa kekirim notif "sudah bayar"
-	// padahal transaksinya masih mungkin di-rollback oleh error setelahnya.
-	if u.notificationUsecase != nil && len(result.Payments) > 0 {
-		last := result.Payments[len(result.Payments)-1]
-		go u.notificationUsecase.SendToMember(context.Background(), memberID, PushPayload{
-			Title: "Pembayaran Kas Berhasil",
-			Body: fmt.Sprintf(
-				"Terima kasih! Pembayaran kas untuk %d bulan sudah tercatat, lunas sampai %s %d.",
-				len(result.Payments), MonthNameID(last.Month), last.Year,
-			),
-		})
-	}
-
-	return result, nil
-}
-
-// createApprovedPaymentsTx books `months` consecutive approved payments
-// starting right after the member's last payment (or the configured
-// default start), and upserts the corresponding cash flow entries - all
-// within the caller's transaction.
-func (u *PaymentUsecase) createApprovedPaymentsTx(ctx context.Context, paymentRepo repository.PaymentRepository, cashFlowRepo repository.CashFlowRepository, memberID uint, months int) ([]domain.Payment, error) {
-	last, err := paymentRepo.FindLastByMemberID(ctx, memberID)
-	if err != nil {
-		return nil, err
-	}
-
-	startMonth, startYear := u.defaultStartMonth, u.defaultStartYear
-	if last != nil {
-		startMonth = last.Month + 1
-		startYear = last.Year
-		if startMonth > 12 {
-			startMonth = 1
-			startYear++
-		}
-	}
-
-	monthsToPay := []domain.MonthYear{{Month: startMonth, Year: startYear}}
-	monthsToPay = append(monthsToPay, NextMonthsAfter(startMonth, startYear, months-1)...)
-
-	created := make([]domain.Payment, 0, months)
-	for _, my := range monthsToPay {
-		p := domain.Payment{
-			MemberID: memberID,
-			Month:    my.Month,
-			Year:     my.Year,
-			Amount:   u.amountPerMonth,
-			Status:   domain.PaymentStatusApproved,
-		}
-		if err := paymentRepo.Create(ctx, &p); err != nil {
-			return nil, err
-		}
-		desc := u.description(my.Month, my.Year)
-		if _, err := cashFlowRepo.UpsertByDescription(ctx, domain.CashFlowTypeIn, domain.CashFlowSourceDues, desc, u.amountPerMonth); err != nil {
-			return nil, err
-		}
-		created = append(created, p)
-	}
-
-	return created, nil
-}
-
-// CreatePaymentByProof runs OCR on an uploaded payment-proof screenshot,
-// validates it, extracts the transferred amount, and (if everything
-// checks out) auto-approves the corresponding payment(s).
-//
-// Preserves the original heuristics (reject camera photos, check edge
-// density, match treasurer name, dedupe by content signature) but reads
-// the treasurer name from configuration instead of a hardcoded literal,
-// and books the resulting payments atomically (see createApprovedPaymentsTx).
-func (u *PaymentUsecase) CreatePaymentByProof(ctx context.Context, memberID uint, imagePath string) (*CreatePaymentResult, error) {
+// CreateByProof runs OCR on an uploaded payment-proof screenshot,
+// validates it, extracts the transferred amount and date, and records
+// the transaction via RecordTransaction (which handles duplicate
+// detection, cursor advancement, cash flow booking, and the push
+// notification).
+func (u *PaymentUsecase) CreateByProof(ctx context.Context, memberID uint, imagePath string) (*RecordTransactionResult, error) {
 	if err := imagevalidator.RejectIfCameraPhoto(imagePath); err != nil {
 		return nil, response.NewAPIError(400, err.Error())
 	}
@@ -510,29 +399,17 @@ func (u *PaymentUsecase) CreatePaymentByProof(ctx context.Context, memberID uint
 		return nil, response.NewAPIError(400, "Nominal pembayaran tidak terbaca, silahkan hubungi bendahara")
 	}
 
-	if u.amountPerMonth <= 0 || int64(nominal)%int64(u.amountPerMonth) != 0 {
-		return nil, response.NewAPIError(400, fmt.Sprintf(
-			"Nominal Rp%.0f bukan kelipatan iuran Rp%.0f", nominal, u.amountPerMonth))
+	transactionDate := jakartaNow()
+	if dateStr := receiptparser.ExtractDate(cleanedText); dateStr != "" {
+		if parsed, err := receiptparser.ParseReceiptDate(dateStr, transactionDate.Location()); err == nil {
+			transactionDate = parsed
+		}
 	}
 
-	dateStr := receiptparser.ExtractDate(cleanedText)
-	sign := receiptparser.Signature(nominal, dateStr, cleanedText)
-
-	existing, err := u.logSignTfRepo.FindBySignatureHash(ctx, sign)
-	if err != nil {
-		return nil, err
-	}
-	if existing != nil {
-		return nil, response.NewAPIError(400, "Bukti Transfer sudah pernah dikirim sebelumnya")
-	}
-
-	return u.CreatePaymentByAdmin(ctx, memberID, nominal, sign)
+	return u.RecordTransaction(ctx, memberID, nominal, domain.TransaksiSourceUpload, nil, transactionDate)
 }
 
-// jakartaNow returns the current time in the Asia/Jakarta timezone,
-// matching the original countPaymentService's explicit timezone handling
-// (and this project's past struggles with inconsistent timezone
-// handling - see member notes on the authV2 UTC standardization work).
+// jakartaNow returns the current time in the Asia/Jakarta timezone.
 // Falls back to plain UTC if the tzdata database isn't available on the
 // host.
 func jakartaNow() time.Time {

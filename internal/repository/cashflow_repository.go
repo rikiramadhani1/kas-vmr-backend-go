@@ -30,16 +30,21 @@ type CashFlowRepository interface {
 	GetLatest(ctx context.Context, limit int) ([]domain.CashFlow, error)
 	// UpsertByDescription atomically adds amountToAdd to an existing
 	// CashFlow row matching `description`, or creates a new one if none
-	// exists.
+	// exists. forDate should be the 1st of the month this entry is
+	// booking dues for - when a NEW row is created (no existing match),
+	// its CreatedAt is set explicitly to forDate rather than the actual
+	// wall-clock time, so a member paying months ahead has each future
+	// month's dues correctly bucketed into that month when grouping
+	// cashflow history by month/year - not all lumped into "whenever the
+	// transfer happened to be processed". Existing rows being added to
+	// keep their original CreatedAt untouched.
 	//
 	// IMPORTANT: to actually be atomic under concurrency, this must be
 	// called with a repository constructed on a *gorm.DB that is itself a
 	// transaction (see db.Transaction(...) in the usecase layer) - the row
 	// lock (`FOR UPDATE`) it takes is only meaningful inside a
-	// transaction. This replaces the original Node.js
-	// find-then-conditionally-update-or-create logic, which raced under
-	// concurrent approvals for the same month.
-	UpsertByDescription(ctx context.Context, cfType, source, description string, amountToAdd float64) (*domain.CashFlow, error)
+	// transaction.
+	UpsertByDescription(ctx context.Context, cfType, source, description string, amountToAdd float64, forDate time.Time) (*domain.CashFlow, error)
 }
 
 type cashFlowRepository struct {
@@ -101,7 +106,7 @@ func (r *cashFlowRepository) GetLatest(ctx context.Context, limit int) ([]domain
 	return list, err
 }
 
-func (r *cashFlowRepository) UpsertByDescription(ctx context.Context, cfType, source, description string, amountToAdd float64) (*domain.CashFlow, error) {
+func (r *cashFlowRepository) UpsertByDescription(ctx context.Context, cfType, source, description string, amountToAdd float64, forDate time.Time) (*domain.CashFlow, error) {
 	var existing domain.CashFlow
 	err := r.db.WithContext(ctx).
 		Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -114,6 +119,7 @@ func (r *cashFlowRepository) UpsertByDescription(ctx context.Context, cfType, so
 			Source:      source,
 			Amount:      amountToAdd,
 			Description: &description,
+			CreatedAt:   forDate,
 		}
 		if err := r.db.WithContext(ctx).Create(newCF).Error; err != nil {
 			return nil, err

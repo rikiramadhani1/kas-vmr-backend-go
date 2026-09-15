@@ -7,3 +7,7 @@ type SubscribePushRequest struct {
 		Auth   string `json:"auth" validate:"required"`
 	} `json:"keys" validate:"required"`
 }
+
+type UnsubscribePushRequest struct {
+	Endpoint string `json:"endpoint" validate:"required,url"`
+}

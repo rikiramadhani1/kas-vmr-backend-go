@@ -29,4 +29,4 @@ type CashFlow struct {
 	CreatedAt   time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 
-func (CashFlow) TableName() string { return "CashFlow" }
+func (CashFlow) TableName() string { return "cash_flows" }

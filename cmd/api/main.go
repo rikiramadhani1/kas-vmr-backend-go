@@ -33,6 +33,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("database error: %v", err)
 	}
+
 	if cfg.AutoMigrate {
 		if err := config.RunMigrations(db); err != nil {
 			log.Fatalf("migration error: %v", err)
@@ -53,8 +54,8 @@ func main() {
 	memberRepo := repository.NewMemberRepository(db)
 	adminRepo := repository.NewAdminRepository(db)
 	paymentRepo := repository.NewPaymentRepository(db)
+	transaksiRepo := repository.NewTransaksiRepository(db)
 	cashFlowRepo := repository.NewCashFlowRepository(db)
-	logSignTfRepo := repository.NewLogSignTfRepository(db)
 	activityRepo := repository.NewActivityRepository(db)
 	emailTxRepo := repository.NewEmailTransactionRepository(db)
 	pushRepo := repository.NewPushRepository(db)
@@ -63,14 +64,13 @@ func main() {
 	adminUsecase := usecase.NewAdminUsecase(adminRepo, signer, tokens)
 	memberUsecase := usecase.NewMemberUsecase(memberRepo, signer, tokens, cfg.SetDefaultPin)
 	cashFlowUsecase := usecase.NewCashFlowUsecase(cashFlowRepo)
-	notificationUsecase := usecase.NewNotificationUsecase(
-		pushRepo, cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey, cfg.VAPIDSubject,
-	)
+	notificationUsecase := usecase.NewNotificationUsecase(pushRepo, cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey, cfg.VAPIDSubject)
 	paymentUsecase := usecase.NewPaymentUsecase(
-		db, paymentRepo, cashFlowRepo, memberRepo, logSignTfRepo, notificationUsecase,
+		db, paymentRepo, transaksiRepo, cashFlowRepo, memberRepo, notificationUsecase,
 		float64(cfg.IuranAmount), cfg.StartMonth, cfg.StartYear, cfg.BendaharaNameKeyword,
 	)
 	activityUsecase := usecase.NewActivityUsecase(activityRepo, memberRepo)
+	reminderUsecase := usecase.NewReminderUsecase(paymentUsecase, notificationUsecase)
 
 	// AutoConfirmUsecase is only meaningful when the mail watcher is
 	// enabled, but we still construct it either way and let
@@ -78,16 +78,13 @@ func main() {
 	// than threading an extra "enabled" flag through the handler layer.
 	var autoConfirmUsecase *usecase.AutoConfirmUsecase
 	if cfg.MailEnabled {
-		autoConfirmUsecase = usecase.NewAutoConfirmUsecase(
-			emailTxRepo, memberRepo, paymentUsecase,
-			float64(cfg.IuranAmount), cfg.UniqueCodeBase,
-		)
+		autoConfirmUsecase = usecase.NewAutoConfirmUsecase(emailTxRepo, memberRepo, paymentUsecase)
 	}
 
 	// ---- handlers ----
 	h := routes.Handlers{
 		Admin:    handler.NewAdminHandler(adminUsecase),
-		Member:   handler.NewMemberHandler(memberUsecase, adminUsecase, notificationUsecase, cfg.VAPIDPublicKey),
+		Member:   handler.NewMemberHandler(memberUsecase, adminUsecase, notificationUsecase),
 		Payment:  handler.NewPaymentHandler(paymentUsecase, autoConfirmUsecase, cfg.UploadDir),
 		CashFlow: handler.NewCashFlowHandler(cashFlowUsecase),
 		Activity: handler.NewActivityHandler(activityUsecase),
@@ -126,6 +123,12 @@ func main() {
 		}()
 	} else {
 		log.Println("mailwatcher: disabled (set MAIL_WATCHER_ENABLED=true to enable auto-confirm via email)")
+	}
+
+	if cfg.ReminderEnabled {
+		go reminderUsecase.StartScheduler(workerCtx, cfg.ReminderDay, cfg.ReminderHour)
+	} else {
+		log.Println("reminder: disabled (set REMINDER_ENABLED=true to enable monthly dues reminders)")
 	}
 
 	// ---- graceful shutdown ----

@@ -2,8 +2,9 @@ package domain
 
 import "time"
 
-// PushSubscription mirip satu "alamat" browser/device yang subscribe
-// notifikasi. Satu member bisa punya banyak baris (HP, laptop, dst).
+// PushSubscription represents one browser/device's Web Push
+// subscription. A member can have several (phone, laptop, etc) - all are
+// notified when NotificationUsecase.SendToMember is called.
 type PushSubscription struct {
 	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
 	MemberID  uint      `gorm:"not null;index" json:"member_id"`

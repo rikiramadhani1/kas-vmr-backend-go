@@ -13,4 +13,4 @@ type LogSignTf struct {
 	CreatedAt     time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 
-func (LogSignTf) TableName() string { return "LogSignTf" }
+func (LogSignTf) TableName() string { return "log_sign_tfs" }

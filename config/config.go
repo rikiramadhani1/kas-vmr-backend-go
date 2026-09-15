@@ -15,7 +15,6 @@ type Config struct {
 
 	DatabaseURL string
 	RedisURL    string
-	AutoMigrate bool
 
 	JWTAccessSecret  string
 	JWTRefreshSecret string
@@ -26,20 +25,10 @@ type Config struct {
 	SetDefaultPin string
 
 	// BendaharaNameKeyword is used to validate OCR'd payment proof text
-	// against the treasurer's name. Configurable instead of hardcoded
-	// (see README "Perbaikan dari versi Node.js").
+	// against the treasurer's name. Configurable instead of hardcoded.
 	BendaharaNameKeyword string
 
 	UploadDir string
-
-	// UniqueCodeBase is the modulus used for the "nominal unik" scheme:
-	// a member transfers `n * IuranAmount + memberID` instead of a plain
-	// multiple of IuranAmount, so the auto-confirm worker can recover
-	// *which* member paid purely from the transferred amount, with no
-	// OCR/notification-content guessing involved. Must divide evenly
-	// into IuranAmount so decoding is unambiguous. Default 1000 supports
-	// up to 999 distinct member codes.
-	UniqueCodeBase int
 
 	// --- Mail watcher (auto-confirm via SeaBank email notification) ---
 	MailEnabled      bool
@@ -49,9 +38,17 @@ type Config struct {
 	MailSenderFilter string // only process emails from this sender address
 	MailPollInterval int    // seconds; fallback safety-net poll alongside IDLE
 
+	// --- Dues reminder job ---
+	ReminderEnabled bool
+	ReminderDay     int // day of month (Asia/Jakarta) to send the reminder
+	ReminderHour    int // hour of day (0-23, Asia/Jakarta) to send the reminder
+
+	// --- Web Push (VAPID) ---
 	VAPIDPublicKey  string
 	VAPIDPrivateKey string
 	VAPIDSubject    string
+
+	AutoMigrate bool
 }
 
 // Load reads environment variables (optionally from a .env file) and returns
@@ -65,10 +62,9 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		AppEnv:               getEnv("APP_ENV", "development"),
-		Port: 				  getEnv("PORT", getEnv("API_PORT", "3001")),
+		Port:                 getEnv("PORT", getEnv("API_PORT", "3001")),
 		DatabaseURL:          os.Getenv("DATABASE_URL"),
 		RedisURL:             getEnv("REDIS_URL", "redis://localhost:6379"),
-		AutoMigrate: 		  getEnvBool("DB_AUTO_MIGRATE", false),
 		JWTAccessSecret:      os.Getenv("JWT_ACCESS_SECRET"),
 		JWTRefreshSecret:     os.Getenv("JWT_REFRESH_SECRET"),
 		IuranAmount:          getEnvInt("IURAN_AMOUNT", 20000),
@@ -77,7 +73,6 @@ func Load() (*Config, error) {
 		SetDefaultPin:        os.Getenv("SET_DEFAULT_PIN"),
 		BendaharaNameKeyword: getEnv("BENDAHARA_NAME_KEYWORD", ""),
 		UploadDir:            getEnv("UPLOAD_DIR", "./uploads"),
-		UniqueCodeBase:       getEnvInt("UNIQUE_CODE_BASE", 1000),
 
 		MailEnabled:      getEnvBool("MAIL_WATCHER_ENABLED", false),
 		MailIMAPHost:     getEnv("MAIL_IMAP_HOST", "imap.gmail.com:993"),
@@ -85,9 +80,16 @@ func Load() (*Config, error) {
 		MailAppPassword:  os.Getenv("MAIL_APP_PASSWORD"),
 		MailSenderFilter: getEnv("MAIL_SENDER_FILTER", "notification@seabank.co.id"),
 		MailPollInterval: getEnvInt("MAIL_POLL_INTERVAL_SECONDS", 120),
+
+		ReminderEnabled: getEnvBool("REMINDER_ENABLED", false),
+		ReminderDay:     getEnvInt("REMINDER_DAY", 5),
+		ReminderHour:    getEnvInt("REMINDER_HOUR", 9),
+
 		VAPIDPublicKey:  os.Getenv("VAPID_PUBLIC_KEY"),
 		VAPIDPrivateKey: os.Getenv("VAPID_PRIVATE_KEY"),
 		VAPIDSubject:    getEnv("VAPID_SUBJECT", "mailto:admin@example.com"),
+
+		AutoMigrate: getEnvBool("AUTO_MIGRATE", false),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -119,13 +121,6 @@ func (c *Config) validate() error {
 		return fmt.Errorf("missing required environment variables: %v", missing)
 	}
 
-	if c.UniqueCodeBase <= 0 {
-		return fmt.Errorf("UNIQUE_CODE_BASE must be a positive integer")
-	}
-	if c.IuranAmount%c.UniqueCodeBase != 0 {
-		return fmt.Errorf("IURAN_AMOUNT (%d) must be an exact multiple of UNIQUE_CODE_BASE (%d), otherwise the nominal-unik scheme can't unambiguously decode which part of a transfer amount is the member code vs the number of months", c.IuranAmount, c.UniqueCodeBase)
-	}
-
 	if c.MailEnabled {
 		var mailMissing []string
 		if c.MailUsername == "" {
@@ -137,6 +132,13 @@ func (c *Config) validate() error {
 		if len(mailMissing) > 0 {
 			return fmt.Errorf("MAIL_WATCHER_ENABLED=true but missing: %v", mailMissing)
 		}
+	}
+
+	if c.ReminderDay < 1 || c.ReminderDay > 28 {
+		return fmt.Errorf("REMINDER_DAY must be between 1 and 28 (got %d) - stick to 28 or below so it exists in every month", c.ReminderDay)
+	}
+	if c.ReminderHour < 0 || c.ReminderHour > 23 {
+		return fmt.Errorf("REMINDER_HOUR must be between 0 and 23 (got %d)", c.ReminderHour)
 	}
 
 	return nil

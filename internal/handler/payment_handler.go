@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -26,80 +25,35 @@ func NewPaymentHandler(paymentUsecase *usecase.PaymentUsecase, autoConfirmUsecas
 	return &PaymentHandler{paymentUsecase: paymentUsecase, autoConfirmUsecase: autoConfirmUsecase, uploadDir: uploadDir}
 }
 
-// CreateRequest handles POST /api/payments/request (member requests to pay N months).
-func (h *PaymentHandler) CreateRequest(c echo.Context) error {
-	var req dto.CreatePaymentRequestBody
-	if err := c.Bind(&req); err != nil {
-		return response.Error(c, "Payload tidak valid", 400)
-	}
-	if err := c.Validate(&req); err != nil {
-		return response.Error(c, err.Error(), 400)
-	}
-
+// GetRecent handles GET /api/payments/recent (member's own last 5
+// transactions) - equivalent to the original "riwayat pembayaran", now
+// backed by the Transaksi table.
+func (h *PaymentHandler) GetRecent(c echo.Context) error {
 	memberID, ok := middleware.GetUserID(c)
 	if !ok {
 		return response.Error(c, "Unauthorized", 401)
 	}
 
-	payments, err := h.paymentUsecase.CreatePaymentRequest(c.Request().Context(), memberID, req.Months)
+	list, err := h.paymentUsecase.GetRecentByMemberID(c.Request().Context(), memberID, 5)
 	if err != nil {
 		return response.FromError(c, err)
 	}
-	return response.Success(c, "Permintaan pembayaran berhasil dibuat", payments, 201)
+	return response.Success(c, "Berhasil mengambil riwayat pembayaran", list)
 }
 
-// GetAll handles GET /api/payments?phone=... - matches the original
-// getAllPayments, which took a phone query param directly rather than the
-// authenticated user (kept as-is since it's used by admin/bendahara
-// lookups, not by the member themselves).
-func (h *PaymentHandler) GetAll(c echo.Context) error {
+// GetRecentByPhone handles GET /api/payments?phone=... (admin/bendahara
+// lookup by phone).
+func (h *PaymentHandler) GetRecentByPhone(c echo.Context) error {
 	phone := c.QueryParam("phone")
 	if phone == "" {
 		return response.Error(c, `Query param "phone" wajib diisi`, 400)
 	}
 
-	list, err := h.paymentUsecase.GetAllByPhone(c.Request().Context(), phone)
+	list, err := h.paymentUsecase.GetRecentByPhone(c.Request().Context(), phone, 5)
 	if err != nil {
 		return response.FromError(c, err)
 	}
-	return response.Success(c, "Berhasil mengambil transaksi", list)
-}
-
-// GetPending handles GET /api/payments/pending (admin only).
-func (h *PaymentHandler) GetPending(c echo.Context) error {
-	list, err := h.paymentUsecase.GetPending(c.Request().Context())
-	if err != nil {
-		return response.FromError(c, err)
-	}
-	return response.Success(c, "Berhasil mengambil pembayaran pending", list)
-}
-
-// Approve handles POST /api/payments/:id/approve (admin only).
-func (h *PaymentHandler) Approve(c echo.Context) error {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		return response.Error(c, "ID tidak valid", 400)
-	}
-
-	result, err := h.paymentUsecase.ApprovePayment(c.Request().Context(), uint(id))
-	if err != nil {
-		return response.FromError(c, err)
-	}
-	return response.Success(c, result.Message, result.Payment)
-}
-
-// Reject handles POST /api/payments/:id/reject (admin only).
-func (h *PaymentHandler) Reject(c echo.Context) error {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		return response.Error(c, "ID tidak valid", 400)
-	}
-
-	result, err := h.paymentUsecase.RejectPayment(c.Request().Context(), uint(id))
-	if err != nil {
-		return response.FromError(c, err)
-	}
-	return response.Success(c, result.Message, result.Payment)
+	return response.Success(c, "Berhasil mengambil riwayat pembayaran", list)
 }
 
 // Count handles GET /api/payments/count (member's own tunggakan).
@@ -125,7 +79,8 @@ func (h *PaymentHandler) ListUnpaid(c echo.Context) error {
 	return response.Success(c, "Berhasil mengambil member yang menunggak", list)
 }
 
-// GetStatus handles GET /api/payments/status (admin only).
+// GetStatus handles GET /api/payments/status (admin only) - members who
+// are currently paid up, the counterpart to ListUnpaid.
 func (h *PaymentHandler) GetStatus(c echo.Context) error {
 	list, err := h.paymentUsecase.FindPaymentStatus(c.Request().Context())
 	if err != nil {
@@ -134,7 +89,8 @@ func (h *PaymentHandler) GetStatus(c echo.Context) error {
 	return response.Success(c, "Berhasil mengambil status pembayaran member", list)
 }
 
-// CreateByAdmin handles POST /api/payments/admin-create (admin only).
+// CreateByAdmin handles POST /api/payments/admin-create (admin only) -
+// manually record a payment, e.g. cash handed in person.
 func (h *PaymentHandler) CreateByAdmin(c echo.Context) error {
 	var req dto.CreatePaymentByAdminRequest
 	if err := c.Bind(&req); err != nil {
@@ -144,16 +100,16 @@ func (h *PaymentHandler) CreateByAdmin(c echo.Context) error {
 		return response.Error(c, err.Error(), 400)
 	}
 
-	result, err := h.paymentUsecase.CreatePaymentByAdmin(c.Request().Context(), req.MemberID, req.Nominal, req.Sign)
+	result, err := h.paymentUsecase.CreateByAdmin(c.Request().Context(), req.MemberID, req.Nominal)
 	if err != nil {
 		return response.FromError(c, err)
 	}
-	return response.Success(c, "Pembayaran berhasil dibuat", result, 201)
+	return response.Success(c, "Pembayaran berhasil dicatat", result, 201)
 }
 
 // ListUnmatched handles GET /api/payments/unmatched-transfers (admin
 // only) - transfers received via the email auto-confirm worker that
-// didn't match any active member's unique code, needing manual review.
+// didn't match any active member's house number, needing manual review.
 func (h *PaymentHandler) ListUnmatched(c echo.Context) error {
 	if h.autoConfirmUsecase == nil {
 		return response.Success(c, "Mail watcher tidak diaktifkan", []interface{}{})
@@ -175,11 +131,6 @@ var allowedUploadExt = map[string]bool{
 
 // CreateByProof handles POST /api/payments/proof (member uploads a
 // transfer-proof screenshot, multipart/form-data, field name "file").
-//
-// The original Node.js handler trusted `req.file.path` (from multer)
-// as-is with no size/extension/mimetype check before feeding it to Jimp
-// and Tesseract. We add basic guardrails here: enforce a max size and a
-// whitelist of image extensions before writing anything to disk.
 func (h *PaymentHandler) CreateByProof(c echo.Context) error {
 	memberID, ok := middleware.GetUserID(c)
 	if !ok {
@@ -222,12 +173,9 @@ func (h *PaymentHandler) CreateByProof(c echo.Context) error {
 		return response.FromError(c, err)
 	}
 	dest.Close()
-	// Always clean up the uploaded file once we're done processing it,
-	// regardless of outcome - the original code left this commented out,
-	// which would slowly fill up disk with old proof images.
 	defer os.Remove(destPath)
 
-	result, err := h.paymentUsecase.CreatePaymentByProof(c.Request().Context(), memberID, destPath)
+	result, err := h.paymentUsecase.CreateByProof(c.Request().Context(), memberID, destPath)
 	if err != nil {
 		return response.FromError(c, err)
 	}

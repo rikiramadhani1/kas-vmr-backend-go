@@ -11,6 +11,7 @@ replace golang.org/x/crypto => github.com/golang/crypto v0.22.0
 replace golang.org/x/text => github.com/golang/text v0.14.0
 
 require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/emersion/go-imap v1.2.1
 	github.com/emersion/go-imap-idle v0.0.0-20210907174914-db2568431445
 	github.com/emersion/go-message v0.18.2
@@ -25,7 +26,6 @@ require (
 )
 
 require (
-	github.com/SherClockHolmes/webpush-go v1.4.0 // indirect
 	github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect

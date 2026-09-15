@@ -19,4 +19,4 @@ type Admin struct {
 	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 
-func (Admin) TableName() string { return "Admin" }
+func (Admin) TableName() string { return "admins" }

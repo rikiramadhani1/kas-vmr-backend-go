@@ -78,6 +78,10 @@ func (u *MemberUsecase) Login(ctx context.Context, phone, pin string) (*AuthToke
 		return nil, response.NewAPIError(404, "Member tidak ditemukan")
 	}
 
+	if member.Status != domain.MemberStatusActive {
+		return nil, response.NewAPIError(403, "Kamu belum aktif, silahkan hubungi admin untuk mengaktifkan")
+	}
+
 	if member.Pin == nil || *member.Pin == "" {
 		// More helpful than the generic "PIN salah" the original code
 		// would have returned here (bcrypt.compare against an empty
@@ -133,15 +137,4 @@ func (u *MemberUsecase) GetAllActive(ctx context.Context) ([]MemberSummary, erro
 
 func (u *MemberUsecase) GetByID(ctx context.Context, id uint) (*domain.Member, error) {
 	return u.memberRepo.FindByID(ctx, id)
-}
-
-// SetBankAccountSuffix mendaftarkan/update 4 digit terakhir nomor
-// rekening SeaBank member - dipakai AutoConfirmUsecase buat cocokin
-// pengirim transfer.
-func (u *MemberUsecase) SetBankAccountSuffix(ctx context.Context, memberID uint, suffix string) error {
-	if len(suffix) != 4 {
-		return response.NewAPIError(400, "Suffix rekening harus 4 digit")
-	}
-	_, err := u.memberRepo.UpdateBankAccountSuffix(ctx, memberID, suffix)
-	return err
 }

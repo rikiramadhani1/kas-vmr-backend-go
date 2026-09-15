@@ -14,10 +14,8 @@ type MemberRepository interface {
 	FindByPhoneOrSpouse(ctx context.Context, phone string) (*domain.Member, error)
 	FindAllActive(ctx context.Context) ([]domain.Member, error)
 	FindByID(ctx context.Context, id uint) (*domain.Member, error)
-	UpdatePin(ctx context.Context, memberID uint, hashedPin string) (*domain.Member, error)
-	FindByBankAccountSuffix(ctx context.Context, suffix string) (*domain.Member, error)
-	UpdateBankAccountSuffix(ctx context.Context, memberID uint, suffix string) (*domain.Member, error)
 	FindByHouseNumber(ctx context.Context, houseNumber string) (*domain.Member, error)
+	UpdatePin(ctx context.Context, memberID uint, hashedPin string) (*domain.Member, error)
 }
 
 type memberRepository struct {
@@ -69,45 +67,12 @@ func (r *memberRepository) FindByID(ctx context.Context, id uint) (*domain.Membe
 	return &member, nil
 }
 
-func (r *memberRepository) UpdatePin(ctx context.Context, memberID uint, hashedPin string) (*domain.Member, error) {
-	var member domain.Member
-	if err := r.db.WithContext(ctx).First(&member, memberID).Error; err != nil {
-		return nil, err
-	}
-	member.Pin = &hashedPin
-	if err := r.db.WithContext(ctx).Model(&member).Update("pin", hashedPin).Error; err != nil {
-		return nil, err
-	}
-	return &member, nil
-}
-
-func (r *memberRepository) UpdateBankAccountSuffix(ctx context.Context, memberID uint, suffix string) (*domain.Member, error) {
-	var member domain.Member
-	if err := r.db.WithContext(ctx).First(&member, memberID).Error; err != nil {
-		return nil, err
-	}
-	member.BankAccountSuffix = &suffix
-	if err := r.db.WithContext(ctx).Model(&member).Update("bank_account_suffix", suffix).Error; err != nil {
-		return nil, err
-	}
-	return &member, nil
-}
-
-func (r *memberRepository) FindByBankAccountSuffix(ctx context.Context, suffix string) (*domain.Member, error) {
-	var member domain.Member
-	err := r.db.WithContext(ctx).
-		Where("bank_account_suffix = ?", suffix).
-		First(&member).Error
-
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &member, nil
-}
-
+// FindByHouseNumber looks up a member by their house number - used by
+// the email auto-confirm worker to identify the payer from the transfer
+// note ("Catatan"), which works regardless of whose bank account the
+// transfer actually came from (unlike matching on the sender's account
+// number, which breaks if a member transfers using a spouse's or
+// friend's account).
 func (r *memberRepository) FindByHouseNumber(ctx context.Context, houseNumber string) (*domain.Member, error) {
 	var member domain.Member
 	err := r.db.WithContext(ctx).
@@ -117,6 +82,18 @@ func (r *memberRepository) FindByHouseNumber(ctx context.Context, houseNumber st
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	return &member, nil
+}
+
+func (r *memberRepository) UpdatePin(ctx context.Context, memberID uint, hashedPin string) (*domain.Member, error) {
+	var member domain.Member
+	if err := r.db.WithContext(ctx).First(&member, memberID).Error; err != nil {
+		return nil, err
+	}
+	member.Pin = &hashedPin
+	if err := r.db.WithContext(ctx).Model(&member).Update("pin", hashedPin).Error; err != nil {
 		return nil, err
 	}
 	return &member, nil

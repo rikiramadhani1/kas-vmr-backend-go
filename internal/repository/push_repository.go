@@ -23,8 +23,8 @@ func NewPushRepository(db *gorm.DB) PushRepository {
 	return &pushRepository{db: db}
 }
 
-// Save upserts by endpoint - kalau member subscribe ulang dari device yang
-// sama (misal token refresh), gak dobel row.
+// Save upserts by endpoint - resubscribing from the same device (e.g.
+// after a subscription refresh) doesn't create a duplicate row.
 func (r *pushRepository) Save(ctx context.Context, sub *domain.PushSubscription) error {
 	return r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{

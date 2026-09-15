@@ -14,21 +14,27 @@ import (
 type PushPayload struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
-	URL   string `json:"url,omitempty"` // dibuka kalau notif diklik
+	URL   string `json:"url,omitempty"`
 }
 
 type NotificationUsecase struct {
-	pushRepo    repository.PushRepository
-	vapidPublic string
+	pushRepo     repository.PushRepository
+	vapidPublic  string
 	vapidPrivate string
 	vapidSubject string
 }
 
 func NewNotificationUsecase(pushRepo repository.PushRepository, vapidPublic, vapidPrivate, vapidSubject string) *NotificationUsecase {
 	return &NotificationUsecase{
-		pushRepo: pushRepo, vapidPublic: vapidPublic,
-		vapidPrivate: vapidPrivate, vapidSubject: vapidSubject,
+		pushRepo:     pushRepo,
+		vapidPublic:  vapidPublic,
+		vapidPrivate: vapidPrivate,
+		vapidSubject: vapidSubject,
 	}
+}
+
+func (u *NotificationUsecase) PublicKey() string {
+	return u.vapidPublic
 }
 
 func (u *NotificationUsecase) Subscribe(ctx context.Context, memberID uint, endpoint, p256dh, auth string) error {
@@ -37,22 +43,36 @@ func (u *NotificationUsecase) Subscribe(ctx context.Context, memberID uint, endp
 	})
 }
 
-// SendToMember mengirim push ke semua device milik member. Dijalankan
-// sebagai best-effort (dipanggil via goroutine oleh caller) - gagal kirim
-// push TIDAK BOLEH menggagalkan proses approve payment yang memicunya.
+func (u *NotificationUsecase) Unsubscribe(ctx context.Context, endpoint string) error {
+	return u.pushRepo.DeleteByEndpoint(ctx, endpoint)
+}
+
+// SendToMember sends a push notification to every device a member has
+// subscribed from. Best-effort: errors are logged, never returned - a
+// failed push must never fail whatever business operation triggered it
+// (payment recording, reminders, etc). Callers should invoke this via
+// `go usecase.SendToMember(...)` so it doesn't add latency either.
 func (u *NotificationUsecase) SendToMember(ctx context.Context, memberID uint, payload PushPayload) {
+	if u.vapidPrivate == "" {
+		return // push notifications not configured yet - skip quietly
+	}
+
 	subs, err := u.pushRepo.FindByMemberID(ctx, memberID)
 	if err != nil {
 		log.Printf("notification: gagal ambil subscription member %d: %v", memberID, err)
 		return
 	}
 
-	body, _ := json.Marshal(payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("notification: gagal marshal payload: %v", err)
+		return
+	}
 
 	for _, sub := range subs {
 		resp, err := webpush.SendNotification(body, &webpush.Subscription{
 			Endpoint: sub.Endpoint,
-			Keys: webpush.Keys{P256dh: sub.P256dh, Auth: sub.Auth},
+			Keys:     webpush.Keys{P256dh: sub.P256dh, Auth: sub.Auth},
 		}, &webpush.Options{
 			VAPIDPublicKey:  u.vapidPublic,
 			VAPIDPrivateKey: u.vapidPrivate,
@@ -65,8 +85,8 @@ func (u *NotificationUsecase) SendToMember(ctx context.Context, memberID uint, p
 		}
 		resp.Body.Close()
 
-		// 404/410 artinya subscription udah gak valid (uninstall app,
-		// clear browser data, dll) - bersihin biar gak dicoba lagi.
+		// 404/410 means the subscription is no longer valid (uninstalled,
+		// browser data cleared, etc) - clean it up so we stop retrying.
 		if resp.StatusCode == 404 || resp.StatusCode == 410 {
 			_ = u.pushRepo.DeleteByEndpoint(ctx, sub.Endpoint)
 		}

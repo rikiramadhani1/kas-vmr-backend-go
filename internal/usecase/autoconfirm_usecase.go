@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/vmr/kas-vmr-backend/internal/domain"
@@ -13,92 +14,37 @@ import (
 )
 
 // AutoConfirmUsecase turns a parsed SeaBank transfer-notification email
-// into an approved payment, using the "nominal unik" scheme (see
-// pkg/paymentcode) to figure out which member paid and for how many
-// months - no OCR, no manual approval needed for transfers that match a
-// known member's code.
+// into a recorded payment.
 //
-// Transfers that DON'T decode to a known, active member (wrong amount, a
-// donation, a typo, etc.) are logged as "unmatched" for the bendahara to
-// review manually rather than silently dropped or guessed at.
+// Members are identified by house number written in the transfer's
+// "Catatan" (note) field - NOT by sender bank account, because a member
+// might transfer using a spouse's or friend's account. Every member is
+// asked to always fill in their house number in the note, regardless of
+// whose account they transfer from.
+//
+// Transfers whose note doesn't match any active member's house number
+// (wrong/missing note, a donation, etc.) are logged as "unmatched" for
+// the bendahara to review manually (e.g. via /payments/admin-create).
 type AutoConfirmUsecase struct {
 	emailTxRepo    repository.EmailTransactionRepository
 	memberRepo     repository.MemberRepository
 	paymentUsecase *PaymentUsecase
-
-	iuranAmount    float64
-	uniqueCodeBase int
 }
 
 func NewAutoConfirmUsecase(
 	emailTxRepo repository.EmailTransactionRepository,
 	memberRepo repository.MemberRepository,
 	paymentUsecase *PaymentUsecase,
-	iuranAmount float64,
-	uniqueCodeBase int,
 ) *AutoConfirmUsecase {
 	return &AutoConfirmUsecase{
 		emailTxRepo:    emailTxRepo,
 		memberRepo:     memberRepo,
 		paymentUsecase: paymentUsecase,
-		iuranAmount:    iuranAmount,
-		uniqueCodeBase: uniqueCodeBase,
 	}
 }
 
 // HandleTransfer is the pkg/mailwatcher.Handler implementation: called
 // once per recognized SeaBank transfer-masuk email.
-// func (u *AutoConfirmUsecase) HandleTransfer(tx *mailwatcher.Transaction) error {
-// 	ctx := context.Background()
-
-// 	if tx.ReferenceNumber != "" {
-// 		existing, err := u.emailTxRepo.FindByReference(ctx, tx.ReferenceNumber)
-// 		if err != nil {
-// 			return fmt.Errorf("cek duplikat referensi: %w", err)
-// 		}
-// 		if existing != nil {
-// 			log.Printf("autoconfirm: referensi %q sudah pernah diproses (status=%s), dilewati", tx.ReferenceNumber, existing.Status)
-// 			return nil
-// 		}
-// 	}
-
-// 	memberID, months, ok := paymentcode.Decode(tx.Amount, u.iuranAmount, u.uniqueCodeBase)
-// 	if !ok {
-// 		return u.logUnmatched(ctx, tx, "nominal tidak cocok dengan skema kode unik manapun")
-// 	}
-
-// 	member, err := u.memberRepo.FindByID(ctx, memberID)
-// 	if err != nil {
-// 		return fmt.Errorf("cek member: %w", err)
-// 	}
-// 	if member == nil || member.Status != domain.MemberStatusActive {
-// 		return u.logUnmatched(ctx, tx, fmt.Sprintf("kode unik %d tidak cocok member aktif manapun", memberID))
-// 	}
-
-// 	nominal := float64(months) * u.iuranAmount
-// 	result, err := u.paymentUsecase.CreatePaymentByAdmin(ctx, memberID, nominal, "")
-// 	if err != nil {
-// 		return u.logUnmatched(ctx, tx, fmt.Sprintf("member #%d cocok tapi gagal membuat payment: %v", memberID, err))
-// 	}
-
-// 	log.Printf("autoconfirm: %s bayar %d bulan (Rp%.0f) via transfer email, ref=%s",
-// 		member.Name, len(result.Payments), nominal, tx.ReferenceNumber)
-
-// 	if tx.ReferenceNumber == "" {
-// 		// Nothing to dedupe against next time, but the payment itself is
-// 		// already booked - just skip the log entry.
-// 		return nil
-// 	}
-
-// 	return u.emailTxRepo.Create(ctx, &domain.EmailTransactionLog{
-// 		ReferenceNumber: tx.ReferenceNumber,
-// 		MemberID:        &memberID,
-// 		Amount:          tx.Amount,
-// 		Status:          domain.EmailTxStatusProcessed,
-// 	})
-// }
-
-
 func (u *AutoConfirmUsecase) HandleTransfer(tx *mailwatcher.Transaction) error {
 	ctx := context.Background()
 
@@ -121,17 +67,17 @@ func (u *AutoConfirmUsecase) HandleTransfer(tx *mailwatcher.Transaction) error {
 		return u.logUnmatched(ctx, tx, fmt.Sprintf("catatan %q tidak cocok nomor rumah member manapun", tx.Note))
 	}
 
-	if u.iuranAmount <= 0 || int64(tx.Amount)%int64(u.iuranAmount) != 0 {
-		return u.logUnmatched(ctx, tx, fmt.Sprintf("member %s cocok tapi nominal Rp%.0f bukan kelipatan iuran", member.Name, tx.Amount))
-	}
-
-	result, err := u.paymentUsecase.CreatePaymentByAdmin(ctx, member.ID, tx.Amount, "")
+	// RecordTransaction handles its own duplicate check (by member+amount
+	// +day, via TransaksiRepository.FindDuplicate) - this is what catches
+	// the exact scenario the email watcher and a member's manual proof
+	// upload could otherwise both record: the SAME real transfer.
+	result, err := u.paymentUsecase.RecordTransaction(ctx, member.ID, tx.Amount, domain.TransaksiSourceEmail, &tx.ReferenceNumber, transactionTimeOrNow(tx))
 	if err != nil {
-		return u.logUnmatched(ctx, tx, fmt.Sprintf("member %s cocok tapi gagal membuat payment: %v", member.Name, err))
+		return u.logUnmatched(ctx, tx, fmt.Sprintf("member %s cocok tapi gagal mencatat transaksi: %v", member.Name, err))
 	}
 
-	log.Printf("autoconfirm: %s bayar %d bulan (Rp%.0f) via transfer email, ref=%s",
-		member.Name, len(result.Payments), tx.Amount, tx.ReferenceNumber)
+	log.Printf("autoconfirm: %s bayar %d bulan (Rp%.0f) via transfer email, ref=%s, lunas sampai %s",
+		member.Name, result.Months, tx.Amount, tx.ReferenceNumber, result.PaidUntil)
 
 	if tx.ReferenceNumber == "" {
 		return nil
@@ -145,11 +91,11 @@ func (u *AutoConfirmUsecase) HandleTransfer(tx *mailwatcher.Transaction) error {
 	})
 }
 
-// findMemberByNote memecah teks bebas "Catatan" jadi token, lalu cocokin
-// tiap token sebagai nomor rumah. Ini penting: dengan tokenisasi (bukan
-// substring match), catatan "Rumah 7", "No 7", atau "Blok A No 7" semua
-// tetap kecocok ke member dengan house_number "7" - dan house_number "1"
-// TIDAK bakal salah kecocok ke catatan yang isinya "12".
+// findMemberByNote tokenizes the free-text "Catatan" field and tries
+// each token as a house number. Tokenizing (rather than a substring
+// match) matters: a note like "Rumah 7" or "Blok A No 7" should match
+// house_number "7" - but house_number "1" must NOT wrongly match a note
+// that says "12".
 func (u *AutoConfirmUsecase) findMemberByNote(ctx context.Context, note string) (*domain.Member, error) {
 	tokens := strings.FieldsFunc(note, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
@@ -166,12 +112,27 @@ func (u *AutoConfirmUsecase) findMemberByNote(ctx context.Context, note string) 
 	return nil, nil
 }
 
-
 // ListUnmatched returns transfers that didn't decode to any active
-// member's unique code, for the bendahara to review and confirm
-// manually (e.g. via /payments/admin-create).
+// member's house number, for the bendahara to review and confirm
+// manually.
 func (u *AutoConfirmUsecase) ListUnmatched(ctx context.Context) ([]domain.EmailTransactionLog, error) {
 	return u.emailTxRepo.FindUnmatched(ctx, 100)
+}
+
+// transactionTimeOrNow parses SeaBank's "Waktu Transaksi" format (e.g.
+// "08 Sep 2026 18:01") into an Asia/Jakarta time.Time, falling back to
+// the current time if the email's format ever changes and parsing
+// fails - the transaction still gets recorded either way, just with a
+// less precise date for duplicate-detection purposes.
+func transactionTimeOrNow(tx *mailwatcher.Transaction) time.Time {
+	loc, err := time.LoadLocation("Asia/Jakarta")
+	if err != nil {
+		loc = time.UTC
+	}
+	if t, err := time.ParseInLocation("02 Jan 2006 15:04", tx.Time, loc); err == nil {
+		return t
+	}
+	return time.Now().In(loc)
 }
 
 func (u *AutoConfirmUsecase) logUnmatched(ctx context.Context, tx *mailwatcher.Transaction, reason string) error {

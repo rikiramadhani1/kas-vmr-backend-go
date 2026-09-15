@@ -13,7 +13,6 @@ type Member struct {
 	Name              string    `gorm:"not null" json:"name"`
 	PhoneNumber       string    `gorm:"uniqueIndex;not null" json:"phone_number"`
 	SpousePhoneNumber *string   `json:"spouse_phone_number,omitempty"`
-	BankAccountSuffix *string 	`json:"-"`
 	Pin               *string   `json:"-"` // never serialize the PIN hash
 	HouseNumber       *string   `json:"house_number,omitempty"`
 	Status            string    `gorm:"not null;default:active" json:"status"`
@@ -25,4 +24,4 @@ type Member struct {
 	LogSignTfs     []LogSignTf    `gorm:"foreignKey:MemberID" json:"-"`
 }
 
-func (Member) TableName() string { return "Member" }
+func (Member) TableName() string { return "members" }

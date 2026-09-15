@@ -1,98 +1,82 @@
 package usecase
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/vmr/kas-vmr-backend/internal/domain"
 )
 
-// CalculateUnpaidMonths is THE single source of truth for figuring out
-// which months a member still owes dues for.
+// CalculateUnpaidMonths lists every month a member owes dues for, given
+// their current "paid until" cursor (see domain.Payment).
 //
-// The original Node.js codebase had three separate implementations of
-// this same idea, and they did not agree with each other:
-//   - kasRepository.getUnpaidMonthsForMember: builds a set of
-//     "year-month" strings from *approved* payments and walks
-//     month-by-month from the configured start (or last paid + 1) up to
-//     the current month, collecting any month missing from the set. This
-//     correctly handles gaps (e.g. paid Aug + Oct but not Sep).
-//   - payment.service.countPaymentService /
-//     findUnpaidMembersService: computed unpaid count via plain
-//     arithmetic `(currentYear-startYear)*12 + (currentMonth-startMonth+1)`
-//     based only on the *last* approved payment, then subtracted the
-//     number of pending payments. This silently assumes any gap in
-//     payment history doesn't exist and that pending payments always
-//     correspond to the earliest unpaid months - both assumptions break
-//     under real-world usage (a member paying out of order, or a pending
-//     payment for a future month).
-//
-// We keep the first (set-based, gap-aware) approach since it's the
-// correct one, and use it everywhere dues need to be calculated.
-func CalculateUnpaidMonths(approvedPayments []domain.Payment, startMonth, startYear int, now time.Time) (unpaid []domain.MonthYear, lastPaid *domain.MonthYear) {
-	approvedSet := make(map[string]struct{}, len(approvedPayments))
-	for _, p := range approvedPayments {
-		approvedSet[monthKey(p.Year, p.Month)] = struct{}{}
-	}
-
-	// Determine lastPaid = most recent approved payment (by year, month).
-	for _, p := range approvedPayments {
-		if lastPaid == nil || p.Year > lastPaid.Year || (p.Year == lastPaid.Year && p.Month > lastPaid.Month) {
-			lastPaid = &domain.MonthYear{Month: p.Month, Year: p.Year}
-		}
-	}
-
+// This used to operate on a whole list of per-month Payment rows and
+// build a set to find gaps (see the git history / old README notes on
+// why THAT existed - it was working around a pending/approved workflow
+// where months could theoretically be approved out of order). Now that
+// every transaction advances a single cursor by N consecutive months
+// starting right after wherever it currently sits, gaps can't happen by
+// construction - so this is now a plain walk from (cursor+1, or the
+// configured start if the member has never paid) up to the current
+// month.
+func CalculateUnpaidMonths(hasPaid bool, cursorMonth, cursorYear int, defaultStartMonth, defaultStartYear int, now time.Time) []domain.MonthYear {
 	currentYear, currentMonthNum := now.Year(), int(now.Month())
 
-	// Already paid up to or beyond the current month - nothing owed.
-	if lastPaid != nil && (lastPaid.Year > currentYear || (lastPaid.Year == currentYear && lastPaid.Month >= currentMonthNum)) {
-		return []domain.MonthYear{}, lastPaid
-	}
-
-	month, year := startMonth, startYear
-	if lastPaid != nil {
-		month = lastPaid.Month + 1
-		year = lastPaid.Year
+	month, year := defaultStartMonth, defaultStartYear
+	if hasPaid {
+		// Already paid up to or beyond the current month - nothing owed.
+		if cursorYear > currentYear || (cursorYear == currentYear && cursorMonth >= currentMonthNum) {
+			return []domain.MonthYear{}
+		}
+		month, year = cursorMonth+1, cursorYear
 		if month > 12 {
 			month = 1
 			year++
 		}
 	}
 
-	unpaid = []domain.MonthYear{}
+	unpaid := []domain.MonthYear{}
 	for year < currentYear || (year == currentYear && month <= currentMonthNum) {
-		if _, ok := approvedSet[monthKey(year, month)]; !ok {
-			unpaid = append(unpaid, domain.MonthYear{Month: month, Year: year})
-		}
+		unpaid = append(unpaid, domain.MonthYear{Month: month, Year: year})
 		month++
 		if month > 12 {
 			month = 1
 			year++
 		}
 	}
-
-	return unpaid, lastPaid
+	return unpaid
 }
 
-// NextMonthsAfter returns the next n consecutive (month, year) pairs
-// following the given starting point - used to extend a payment beyond
-// current arrears into "pay ahead" months.
-func NextMonthsAfter(month, year, n int) []domain.MonthYear {
-	result := make([]domain.MonthYear, 0, n)
-	m, y := month, year
-	for i := 0; i < n; i++ {
-		m++
-		if m > 12 {
-			m = 1
-			y++
+// AdvanceMonths returns the cursor position after paying `months`
+// consecutive months starting right after (fromMonth, fromYear) - or
+// starting at (defaultStartMonth, defaultStartYear) if the member has
+// never paid before (hasPaid == false).
+//
+// Also returns the full list of (month, year) pairs being paid, in
+// order - needed by the caller to book each one into cash flow with the
+// correct month bucket.
+func AdvanceMonths(hasPaid bool, fromMonth, fromYear int, defaultStartMonth, defaultStartYear, months int) (newMonth, newYear int, paidMonths []domain.MonthYear) {
+	month, year := defaultStartMonth, defaultStartYear
+	if hasPaid {
+		month, year = fromMonth+1, fromYear
+		if month > 12 {
+			month = 1
+			year++
 		}
-		result = append(result, domain.MonthYear{Month: m, Year: y})
 	}
-	return result
-}
 
-func monthKey(year, month int) string {
-	return fmt.Sprintf("%d-%02d", year, month)
+	paidMonths = make([]domain.MonthYear, 0, months)
+	for i := 0; i < months; i++ {
+		paidMonths = append(paidMonths, domain.MonthYear{Month: month, Year: year})
+		if i < months-1 {
+			month++
+			if month > 12 {
+				month = 1
+				year++
+			}
+		}
+	}
+
+	return month, year, paidMonths
 }
 
 // MonthNameID returns the Indonesian month name for display purposes

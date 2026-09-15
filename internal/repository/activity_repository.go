@@ -81,6 +81,10 @@ func (r *activityRepository) applyFilter(filter ActivityFilter) *gorm.DB {
 	return db
 }
 
+// FindPaginated returns a raw, unaggregated page of activity log rows
+// (newest first) matching filter, plus the total row count matching the
+// same filter (for computing total pages on the FE) - equivalent to the
+// original NestJS/Express getActivityLog controller.
 func (r *activityRepository) FindPaginated(ctx context.Context, filter ActivityFilter, page, limit int) ([]domain.UserActivity, int64, error) {
 	var total int64
 	if err := r.applyFilter(filter).WithContext(ctx).Count(&total).Error; err != nil {

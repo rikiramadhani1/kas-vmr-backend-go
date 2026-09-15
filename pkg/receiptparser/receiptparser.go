@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -97,6 +98,50 @@ func ExtractDate(cleanedText string) string {
 		return strings.TrimSpace(m)
 	}
 	return ""
+}
+
+// receiptDateLayouts covers the date/time formats Indonesian banking
+// apps commonly print on a transfer receipt screenshot. Tried in order;
+// the first one that parses wins.
+var receiptDateLayouts = []string{
+	"02/01/2006 15:04:05",
+	"02/01/2006 15:04",
+	"02-01-2006 15:04:05",
+	"02-01-2006 15:04",
+	"02/01/06 15:04:05",
+	"02/01/06 15:04",
+	"02-01-06 15:04:05",
+	"02-01-06 15:04",
+}
+
+// yearlessDateLayouts is tried when the receipt only shows day/month
+// with no year - the current year is assumed (see ParseReceiptDate).
+var yearlessDateLayouts = []string{
+	"02/01 15:04:05",
+	"02/01 15:04",
+	"02-01 15:04:05",
+	"02-01 15:04",
+}
+
+// ParseReceiptDate converts the raw string returned by ExtractDate into
+// a time.Time, in the given location (pass the same location used
+// elsewhere for "now", e.g. Asia/Jakarta) - used so a payment-proof
+// screenshot's actual transfer date/time can be compared for duplicate
+// detection (see TransaksiRepository.FindDuplicate) instead of relying
+// on whenever the upload happened to be processed.
+func ParseReceiptDate(raw string, loc *time.Location) (time.Time, error) {
+	for _, layout := range receiptDateLayouts {
+		if t, err := time.ParseInLocation(layout, raw, loc); err == nil {
+			return t, nil
+		}
+	}
+	for _, layout := range yearlessDateLayouts {
+		if t, err := time.ParseInLocation(layout, raw, loc); err == nil {
+			now := time.Now().In(loc)
+			return time.Date(now.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, loc), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("format tanggal %q tidak dikenali", raw)
 }
 
 // Signature builds a stable dedup fingerprint from the nominal, the

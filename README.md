@@ -1,51 +1,112 @@
-# kas-vmr-backend (Go rewrite)
+# kas-vmr-backend (Go)
 
-Rewrite dari sistem kas Node.js/TypeScript (Express + Prisma + Baileys) ke
-**Go + Echo + GORM**, dengan clean architecture (domain → repository →
-usecase → handler → routes), fase ini fokus ke REST API saja (bot
-WhatsApp menyusul di fase berikutnya).
+Backend REST API sistem kas komunitas, Go + Echo + GORM, clean
+architecture (domain → repository → usecase → handler → routes).
 
-Sudah tervalidasi: `go build ./...` dan `go vet ./...` lolos bersih di
-Go 1.22.
+Sudah tervalidasi: `go build ./...`, `go vet ./...`, `go test ./...`
+lolos bersih di Go 1.22.
 
 ## Struktur Project
 
 ```
-cmd/api/main.go           entry point: wiring config, DB, redis, semua layer, graceful shutdown
+cmd/api/main.go           entry point: wiring semua layer + background workers + graceful shutdown
 config/                   load env, koneksi Postgres (GORM), koneksi Redis
-internal/domain/          model (mirror 1:1 dari schema.prisma)
-internal/repository/      akses data (GORM), termasuk operasi transaksional
-internal/usecase/         business logic (setara *.service.ts)
-internal/dto/             request body + validasi (pengganti Zod)
+internal/domain/          model data
+internal/repository/      akses data (GORM)
+internal/usecase/         business logic
+internal/dto/             request body + validasi
 internal/middleware/      auth (JWT), role guard, activity logger, validator
-internal/handler/         HTTP handler (setara *.controller.ts)
-internal/routes/          route registration (setara routes/*.js)
-pkg/jwtutil/              sign/verify access & refresh token
-pkg/tokenstore/           refresh token store di Redis (fix: SCAN, bukan KEYS)
-pkg/response/             envelope { meta, data } (setara utils/response.ts)
-pkg/phoneutil/            satu aturan normalisasi nomor HP (dulu ada 2 versi beda)
-pkg/imagevalidator/       cek EXIF kamera, dimensi, edge density utk bukti transfer
-pkg/ocr/                  preprocessing gambar (stdlib) + panggil binary tesseract
-pkg/receiptparser/        ekstrak nominal & buat signature hash dari teks OCR
-pkg/paymentcode/          skema "nominal unik" - encode/decode kode member dari nominal transfer
-pkg/mailwatcher/          parser email notifikasi SeaBank + IMAP IDLE watcher (auto-confirm)
+internal/handler/         HTTP handler
+internal/routes/          route registration
+pkg/jwtutil/               sign/verify access & refresh token
+pkg/tokenstore/            refresh token store di Redis
+pkg/response/              envelope { meta, data }
+pkg/phoneutil/              normalisasi nomor HP
+pkg/imagevalidator/         cek EXIF kamera, edge density utk bukti transfer
+pkg/ocr/                    preprocessing gambar + panggil binary tesseract
+pkg/receiptparser/          ekstrak nominal & tanggal dari teks OCR
+pkg/mailwatcher/            parser email notifikasi SeaBank + IMAP IDLE watcher
 ```
+
+## Model Pembayaran (PENTING - baca sebelum migrasi dari versi lama)
+
+Sistem pembayaran sudah **direstrukturisasi total**, gak lagi 1 baris
+Payment per bulan dengan status pending/approved/rejected. Sekarang:
+
+- **`Payment`** = 1 baris **per member**, isinya cuma cursor "lunas sampai
+  bulan-tahun berapa" (`paid_until_month`, `paid_until_year`). Gak ada
+  field `amount` atau `status` lagi.
+- **`Transaksi`** (tabel baru) = catatan tiap uang masuk yang berhasil
+  dicocokkan ke member (nominal, sumber `upload`/`email`/`admin`, tanggal
+  transaksi). Ini yang jadi sumber "riwayat pembayaran".
+- **Gak ada lagi alur pending/approve/reject.** Begitu transaksi
+  terdeteksi (upload bukti atau email SeaBank), langsung otomatis:
+  catat `Transaksi` → majukan cursor `Payment` → update `CashFlow` →
+  kirim push notifikasi ke member.
+- **Validasi anti-duplikat**: sebelum transaksi baru dicatat, dicek dulu
+  apakah member yang sama sudah punya transaksi dengan **nominal +
+  tanggal (hari) yang sama** — kalau iya, ditolak sebagai duplikat. Ini
+  yang mencegah 1 transfer asli ke-hitung 2x kalau kebetulan kebaca lewat
+  email **dan** di-upload manual sama membernya.
+
+⚠️ **Kalau kamu sudah deploy versi lama dengan data asli**: `GORM
+AutoMigrate` cuma nambah kolom/tabel baru, **gak bisa** hapus/ubah tipe
+kolom lama. Tabel `payments` lama (kolom `amount`, `status`, `month`,
+`year`) perlu di-drop manual dulu sebelum jalanin versi ini:
+
+```sql
+DROP TABLE IF EXISTS payments;
+```
+
+Kalau masih tahap development/testing (belum ada data beneran), gak
+perlu khawatir, tinggal jalanin aja.
+
+## Auto-confirm via email SeaBank
+
+Member dicocokkan lewat **nomor rumah yang ditulis di kolom "Catatan"**
+pas transfer — **bukan** dari nomor rekening pengirim, supaya tetap
+kecocok walau transfer dari rekening suami/istri/teman. Setiap member
+wajib selalu isi catatan dengan nomor rumahnya.
+
+Baca `internal/usecase/autoconfirm_usecase.go` untuk detail
+tokenisasi/matching-nya.
+
+## Push Notification (Web Push / VAPID)
+
+Setiap kali transaksi berhasil dicatat (lewat upload maupun email),
+member otomatis dapat push notification "Pembayaran kas untuk N bulan
+sudah tercatat, lunas sampai bulan X". Setup:
+
+1. `npx web-push generate-vapid-keys` → isi `VAPID_PUBLIC_KEY` /
+   `VAPID_PRIVATE_KEY` di `.env`.
+2. FE perlu subscribe lewat `POST /api/members/push-subscribe` (ambil
+   public key dulu dari `GET /api/members/push-public-key`, endpoint
+   publik tanpa auth).
+3. 1 member bisa punya banyak subscription (device berbeda) - semuanya
+   dapat notif bersamaan.
+
+Kalau `VAPID_PRIVATE_KEY` kosong, fitur ini otomatis nonaktif (skip
+diam-diam, gak bikin error) - jadi aman dijalankan tanpa setup ini dulu.
+
+## Reminder Iuran Otomatis
+
+Job background yang jalan tiap hari, ngecek member yang masih nunggak,
+kirim push reminder di tanggal & jam yang dikonfigurasi
+(`REMINDER_DAY`, `REMINDER_HOUR`, default tanggal 5 jam 09:00 WIB).
+Nonaktif secara default - set `REMINDER_ENABLED=true` buat aktifin.
 
 ## Menjalankan
 
 1. `cp .env.example .env` lalu isi `DATABASE_URL`, `REDIS_URL`,
-   `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` (**wajib**, app akan
-   langsung gagal start kalau kosong — lihat bagian "Perbaikan" #6).
+   `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` (wajib).
 2. Pastikan Postgres & Redis jalan.
-3. Install `tesseract-ocr` + `tesseract-ocr-ind` di server/host (dipanggil
-   via `exec.Command`, bukan cgo binding — sesuai preferensi kamu).
-   - Ubuntu/Debian: `apt install tesseract-ocr tesseract-ocr-ind`
+3. Install `tesseract-ocr` + `tesseract-ocr-ind` (buat OCR bukti
+   transfer): `apt install tesseract-ocr tesseract-ocr-ind`
 4. `go mod download`
-5. `go run ./cmd/api` — migrasi tabel jalan otomatis via GORM AutoMigrate
-   saat start.
+5. `go run ./cmd/api` - migrasi tabel jalan otomatis via GORM
+   AutoMigrate saat start.
 
-Atau pakai Docker: `docker build -t kas-api . && docker run --env-file .env -p 3001:3001 kas-api`
-(image sudah termasuk `tesseract-ocr`).
+Atau Docker: `docker build -t kas-api . && docker run --env-file .env -p 3001:3001 kas-api`
 
 ## Endpoint
 
@@ -54,8 +115,8 @@ Semua di bawah prefix `/api`.
 | Method | Path | Auth | Keterangan |
 |---|---|---|---|
 | POST | /auth/admin | - | Login admin |
-| POST | /auth | - | Login member (phone+PIN) |
-| POST | /auth/token | member/admin | Refresh access token |
+| POST | /auth | - | Login member (phone+PIN); menolak kalau member berstatus inactive |
+| POST | /auth/token | - | Refresh access token (TIDAK butuh access token valid - itu justru tujuannya) |
 | POST | /auth/logout | - | Revoke 1 refresh token |
 | POST | /auth/logout-all | - | Revoke semua refresh token milik user |
 | GET | /auth/profile | member/admin | Profile sesuai role |
@@ -64,133 +125,55 @@ Semua di bawah prefix `/api`.
 | GET | /members/:id | admin | Detail 1 member |
 | POST | /members/pin | member | Set PIN sendiri |
 | POST | /members/:member_id/reset-pin | admin | Reset PIN ke default |
-| POST | /payments/request | member | Ajukan bayar N bulan (pending) |
+| GET | /members/push-public-key | - | Ambil VAPID public key |
+| POST | /members/push-subscribe | member | Daftarkan device buat push notif |
+| POST | /members/push-unsubscribe | member | Batalkan subscription 1 device |
 | GET | /payments/count | member | Hitung tunggakan sendiri |
-| GET | /payments/pending | admin/bendahara | List payment pending |
+| GET | /payments/recent | member | 5 transaksi terakhir milik sendiri |
 | GET | /payments/unpaid | admin/bendahara | List member yang menunggak |
-| POST | /payments/:id/approve | admin/bendahara | Approve payment |
-| POST | /payments/:id/reject | admin/bendahara | Reject payment |
-| POST | /payments/admin-create | admin/bendahara | Catat payment manual (approved langsung) |
-| POST | /payments/proof | member | Upload bukti transfer (OCR auto-approve) |
-| GET | /payments/unmatched-transfers | admin/bendahara | Transfer via email yang gak cocok kode unik manapun |
-| GET | /payments?phone=... | admin/bendahara | Riwayat payment by phone |
+| POST | /payments/admin-create | admin/bendahara | Catat payment manual |
+| POST | /payments/proof | member | Upload bukti transfer (auto-record) |
+| GET | /payments/unmatched-transfers | admin/bendahara | Transfer email yang gak cocok nomor rumah manapun |
+| GET | /payments?phone=... | admin/bendahara | Riwayat transaksi by phone |
 | GET | /cashflow?year=... | member/admin | Riwayat cashflow |
 | GET | /cashflow/saldo?all=true | member/admin | Saldo kas |
 | POST | /cashflow | admin/bendahara | Catat cashflow manual |
 | GET | /analytics/wau | admin | Weekly active users |
 | GET | /analytics/action | admin | Aktivitas per member |
 
-**Catatan asumsi:** file route asli (`payment.route.js`) yang kamu kirim
-cuma mendaftarkan `/request`, `/count`, `/pending`, `/:id/approve`,
-`/:id/reject`, `GET /`. Tapi controller-nya juga punya
-`createPaymentByAdminHandler`, `createPaymentByProofHandler`, dan
-`listUnpaidMembersHandler` yang tidak pernah di-wire ke route manapun di
-file yang kamu kasih. Aku asumsikan itu memang belum sempat didaftarkan
-(bukan sengaja dihilangkan) dan menambahkan route yang masuk akal untuk
-ketiganya (`/payments/admin-create`, `/payments/proof`,
-`/payments/unpaid`). Begitu juga role `bendahara` untuk endpoint approval
-— di kode asli tidak terlihat middleware role spesifik di rute payment,
-jadi aku set `admin` + `bendahara` sebagai default yang masuk akal.
-Silakan sesuaikan di `internal/routes/routes.go` kalau beda dari yang kamu mau.
+## Perbaikan penting
 
-## Fitur baru: Auto-confirm payment via email notifikasi SeaBank
+1. **Bug refresh token (2 penyebab, sudah diperbaiki)**:
+   - Route `/auth/token` sebelumnya butuh access token valid buat
+     diakses - kontradiktif, karena endpoint ini justru dipanggil pas
+     access token sudah expired. Middleware `auth` sudah dihapus dari
+     route ini.
+   - FE (kalau masih pakai interceptor lama) perlu cek status **401**,
+     bukan 403 - itu yang dikembalikan middleware Go untuk token
+     invalid/expired.
+2. **Race condition & atomicity** - approve/pencatatan payment,
+   pemajuan cursor, dan update cashflow semuanya dalam 1 DB transaction
+   dengan row lock.
+3. **Cashflow bulan depan** - kalau member bayar untuk bulan-bulan yang
+   belum tiba, `created_at` cashflow-nya di-set ke tanggal 1 bulan itu
+   (bukan waktu transaksi diproses), supaya pengelompokan riwayat per
+   bulan tetap akurat.
+4. Detail perbaikan lain (JWT secret wajib, Redis SCAN vs KEYS,
+   normalisasi nomor HP, dll) ada di riwayat commit/histori chat.
 
-Fitur ini **tidak ada** di kode Node.js asli — ditambahkan berdasarkan
-diskusi kita soal cara paling simple buat konfirmasi pembayaran tanpa
-OCR/API bank. Cara kerjanya:
+## Yang belum termasuk
 
-1. Setiap member ditugasin transfer dengan **nominal unik**:
-   `n_bulan * IURAN_AMOUNT + kode_unik_member` (kode unik = ID member).
-   Contoh: iuran Rp20.000, member ID 7 bayar 1 bulan → transfer **Rp20.007**.
-   Lihat `pkg/paymentcode` (`Encode`/`Decode`), sudah ada unit test.
-2. Email notifikasi "transfer masuk" dari SeaBank yang masuk ke Gmail kas
-   di-watch via **IMAP IDLE** (near-real-time, bukan polling berat) —
-   lihat `pkg/mailwatcher`. Fallback otomatis ke polling kalau server
-   gak dukung IDLE.
-3. Isi email di-parse (line-based, sudah divalidasi pakai contoh email
-   asli SeaBank kamu, termasuk edge case field `Catatan` yang kosong).
-4. Nominal hasil parse di-*decode* balik jadi `(memberID, jumlah_bulan)`.
-   Kalau cocok member aktif → otomatis panggil `CreatePaymentByAdmin`
-   (payment langsung `approved` + cashflow ke-update, atomic).
-   Kalau nominal gak cocok skema kode unik manapun (misal donasi/salah
-   transfer) → dicatat sebagai `unmatched` di tabel
-   `email_transaction_logs`, bisa dicek admin lewat
-   `GET /payments/unmatched-transfers` buat diproses manual.
-5. Dedup pakai `No. Referensi` dari email (bukan IMAP `\Seen` flag) —
-   jadi aman kalau ada reprocessing/restart, gak bakal dobel-catat payment
-   yang sama.
-
-**Cara aktifkan:** set `MAIL_WATCHER_ENABLED=true` + isi `MAIL_USERNAME`
-(Gmail kas) dan `MAIL_APP_PASSWORD` (generate dari Google Account →
-Security → App Passwords, **bukan** password Gmail biasa — akun Gmail
-wajib 2FA aktif dulu). Default nonaktif (`false`), REST API tetap jalan
-normal tanpa ini.
-
-**Batasan yang perlu kamu tau:**
-- Parser cocok ke format email SeaBank yang kamu kasih sebagai contoh —
-  kalau SeaBank ubah template email, parser bisa perlu disesuaikan
-  (`pkg/mailwatcher/parser.go`, sudah ada test-nya buat pegangan).
-- Skema nominal unik butuh member **transfer manual dengan nominal yang
-  benar** (bukan sekadar Rp20.000 polos) — perlu edukasi ke member soal
-  ini (misal ditampilkan di halaman "cara bayar" member).
-- `UNIQUE_CODE_BASE` (default 1000, dukung sampai 999 member) wajib bisa
-  membagi habis `IURAN_AMOUNT` — divalidasi saat startup, app gak akan
-  jalan kalau kombinasinya gak valid.
-
-## Perbaikan dari versi Node.js
-
-1. **Race condition ID cash flow** — versi lama pakai
-   `aggregate(max(id)) + 1` manual sebelum insert. Sekarang pakai
-   auto-increment Postgres.
-2. **Approve payment + update cashflow sekarang atomic** — dibungkus 1
-   DB transaction dengan row lock (`SELECT ... FOR UPDATE`), jadi dua
-   approval bersamaan untuk bulan yang sama tidak akan saling menimpa
-   (lost update). Lihat `PaymentUsecase.ApprovePayment` &
-   `CashFlowRepository.UpsertByDescription`.
-3. **Perhitungan tunggakan disatukan** — dulu ada 3 implementasi beda
-   (kasRepository vs payment.service, dua-duanya beda hasil kalau ada
-   bulan yang di-skip). Sekarang cuma 1 fungsi
-   (`usecase.CalculateUnpaidMonths`) dipakai di semua tempat.
-4. **Hardcode `member_id > 15` dihapus** — diganti pengecekan member
-   benar-benar ada & aktif di database.
-5. **JWT secret wajib di-set** — tidak ada fallback ke string hardcoded
-   seperti versi lama (`'access_secret'`). App gagal start kalau env
-   kosong.
-6. **`RevokeAll` refresh token pakai `SCAN`**, bukan `KEYS` (yang
-   blocking dan berbahaya di Redis production dengan banyak key).
-7. **Nama bendahara untuk validasi OCR jadi configurable**
-   (`BENDAHARA_NAME_KEYWORD`), bukan string hardcoded di source.
-8. **Normalisasi nomor HP disatukan** jadi 1 fungsi (`pkg/phoneutil`),
-   dulu ada 2 aturan beda di controller vs repository yang berisiko
-   out-of-sync.
-9. **Validasi upload file bukti transfer** — max 10MB + whitelist
-   ekstensi (jpg/jpeg/png) sebelum diproses; file sementara selalu
-   dihapus setelah selesai diproses (versi lama meng-comment baris hapus
-   file, jadi folder upload numpuk terus).
-10. **Pesan error ke client disaring** — error internal tak terduga
-    dibalas pesan generik ("Terjadi kesalahan internal"), bukan
-    `err.Error()` mentah yang berisiko bocorin detail implementasi.
-11. **PIN belum diset** sekarang dapat pesan jelas ("Kamu belum mengatur
-    PIN, silakan hubungi admin") alih-alih "PIN tidak sesuai" yang
-    membingungkan.
-12. **Timestamp DB distandarkan ke UTC** (`NowFunc` di GORM config),
-    kalkulasi tunggakan pakai timezone Asia/Jakarta eksplisit — konsisten
-    dengan kebutuhanmu menghindari drift timezone.
-
-## Yang belum termasuk (sengaja, sesuai kesepakatan)
-
-- **Bot WhatsApp (Baileys/whatsmeow)** — fase 2, belum ada di rewrite ini.
-- **Scheduler broadcast bulanan** (`node-cron` equivalent) — menunggu bot
-  aktif dulu di fase 2.
-- Model `WeeklySummary` ada di domain (mirror schema) tapi belum ada
-  repository/usecase karena tidak dipakai di kode asli manapun.
+- **Bot WhatsApp** - tidak ada rencana ditambahkan (digantikan push
+  notification + email auto-confirm).
+- Model `WeeklySummary` ada di domain (mirror schema lama) tapi tidak
+  dipakai di manapun.
+- Tabel `log_sign_tfs` (`LogSignTf`) masih ada di migration untuk
+  kompatibilitas tapi sudah tidak dipakai - dedup sekarang lewat
+  `Transaksi` (nominal + tanggal), bukan hash OCR.
 
 ## Dependency non-standar & catatan replace directive di go.mod
 
 Beberapa dependency Go (`gorm.io/*`, `golang.org/x/*`, `gopkg.in/*`)
-pakai "vanity import path" yang di-resolve ke repo asli di GitHub lewat
-`replace` directive di `go.mod`. Ini **bukan fork tidak resmi** — semua
-menunjuk ke mirror resmi (mis. `gorm.io/gorm` → `github.com/go-gorm/gorm`,
-`golang.org/x/crypto` → `github.com/golang/crypto`), jadi aman dipakai
-seperti biasa. `go mod tidy` / `go build` akan tetap bekerja normal di
-environment kamu.
+pakai vanity import path yang di-resolve ke repo asli di GitHub lewat
+`replace` directive di `go.mod`. Ini bukan fork tidak resmi - semua
+menunjuk ke mirror resmi, aman dipakai seperti biasa.

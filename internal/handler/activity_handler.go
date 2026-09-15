@@ -51,7 +51,8 @@ func (h *ActivityHandler) GetActivityByMember(c echo.Context) error {
 	return response.Success(c, "Aktivitas berhasil diambil", result)
 }
 
-// GetActivityLog handles GET /api/analytics/log?page=&limit=&startDate=&endDate=&action=&memberId= (admin only).
+// GetActivityLog handles GET /api/analytics/logs?page=&limit=&startDate=&endDate=&action=&memberId=
+// (admin only) - raw paginated log, one row per entry.
 func (h *ActivityHandler) GetActivityLog(c echo.Context) error {
 	page, _ := strconv.Atoi(c.QueryParam("page"))
 	limit, _ := strconv.Atoi(c.QueryParam("limit"))

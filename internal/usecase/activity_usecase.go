@@ -18,12 +18,12 @@ type ActivityByMemberDTO struct {
 }
 
 type ActivityLogEntryDTO struct {
-	ID        uint          `json:"id"`
-	MemberName string       `json:"member_name"`
-	Action    string        `json:"action"`
-	Feature   string        `json:"feature"`
-	Metadata  domain.JSONMap `json:"metadata,omitempty"`
-	CreatedAt time.Time     `json:"created_at"`
+	ID         uint           `json:"id"`
+	MemberName string         `json:"member_name"`
+	Action     string         `json:"action"`
+	Feature    string         `json:"feature"`
+	Metadata   domain.JSONMap `json:"metadata,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
 }
 
 type PaginationDTO struct {
@@ -120,8 +120,11 @@ func (u *ActivityUsecase) GetActivityByMember(ctx context.Context, start, end *t
 	return result, nil
 }
 
-// GetActivityLog returns a paginated, filterable activity log with member
-// names resolved - equivalent to the original getActivityLog controller.
+// GetActivityLog returns a paginated, filterable raw activity log
+// (newest first, member names resolved) - equivalent to the original
+// NestJS/Express getActivityLog controller. Unlike GetActivityByMember,
+// this returns one row per log entry rather than grouping by
+// member+action.
 func (u *ActivityUsecase) GetActivityLog(ctx context.Context, page, limit int, filter repository.ActivityFilter) (*ActivityLogResult, error) {
 	if page < 1 {
 		page = 1
