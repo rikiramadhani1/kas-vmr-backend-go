@@ -18,9 +18,10 @@ import (
 )
 
 type CountPaymentDTO struct {
-	Unpaid    int      `json:"unpaid"`
-	MonthsDue []string `json:"monthsDue"`
-	PaidUntil *string  `json:"paidUntil,omitempty"`
+	Unpaid      int      `json:"unpaid"`
+	MonthsDue   []string `json:"monthsDue"`
+	PaidUntil   *string  `json:"paidUntil,omitempty"`
+	HouseNumber string   `json:"house_number,omitempty"`
 }
 
 type UnpaidMemberDTO struct {
@@ -243,6 +244,11 @@ func (u *PaymentUsecase) GetRecentByPhone(ctx context.Context, phone string, lim
 
 // CountPayment reports how many months a member currently owes.
 func (u *PaymentUsecase) CountPayment(ctx context.Context, memberID uint) (*CountPaymentDTO, error) {
+	member, err := u.memberRepo.FindByID(ctx, memberID)
+	if err != nil {
+		return nil, err
+	}
+
 	cursor, err := u.paymentRepo.FindByMemberID(ctx, memberID)
 	if err != nil {
 		return nil, err
@@ -262,7 +268,11 @@ func (u *PaymentUsecase) CountPayment(ctx context.Context, memberID uint) (*Coun
 		monthsDue = append(monthsDue, fmt.Sprintf("%s %d", MonthNameID(my.Month), my.Year))
 	}
 
-	dto := &CountPaymentDTO{Unpaid: len(unpaid), MonthsDue: monthsDue}
+	dto := &CountPaymentDTO{
+		Unpaid:      len(unpaid),
+		MonthsDue:   monthsDue,
+		HouseNumber: *member.HouseNumber,
+	}
 	if hasPaid {
 		paidUntil := fmt.Sprintf("%s %d", MonthNameID(cursorMonth), cursorYear)
 		dto.PaidUntil = &paidUntil

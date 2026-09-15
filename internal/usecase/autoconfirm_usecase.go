@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/vmr/kas-vmr-backend/internal/domain"
 	"github.com/vmr/kas-vmr-backend/internal/repository"
@@ -96,18 +96,43 @@ func (u *AutoConfirmUsecase) HandleTransfer(tx *mailwatcher.Transaction) error {
 // match) matters: a note like "Rumah 7" or "Blok A No 7" should match
 // house_number "7" - but house_number "1" must NOT wrongly match a note
 // that says "12".
+// func (u *AutoConfirmUsecase) findMemberByNote(ctx context.Context, note string) (*domain.Member, error) {
+// 	tokens := strings.FieldsFunc(note, func(r rune) bool {
+// 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+// 	})
+// 	for _, token := range tokens {
+// 		member, err := u.memberRepo.FindByHouseNumber(ctx, token)
+// 		if err != nil {
+// 			return nil, err
+// 		}
+// 		if member != nil && member.Status == domain.MemberStatusActive {
+// 			return member, nil
+// 		}
+// 	}
+// 	return nil, nil
+// }
+
+var houseNumberPattern = regexp.MustCompile(`^\d+[A-Za-z]?$`)
+// findMemberByNote requires the note to be EXACTLY a house number per
+// the house numbering standard (digits + optional single letter, e.g.
+// "12A"). This is deliberately strict: house numbers like "12" and
+// "12A" can be different, unrelated members, so any ambiguity (extra
+// words, a stray space splitting the letter off, wrong format) must
+// fall through to unmatched for manual bendahara review - silently
+// guessing risks crediting the wrong member's payment.
 func (u *AutoConfirmUsecase) findMemberByNote(ctx context.Context, note string) (*domain.Member, error) {
-	tokens := strings.FieldsFunc(note, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
-	for _, token := range tokens {
-		member, err := u.memberRepo.FindByHouseNumber(ctx, token)
-		if err != nil {
-			return nil, err
-		}
-		if member != nil && member.Status == domain.MemberStatusActive {
-			return member, nil
-		}
+	trimmed := strings.TrimSpace(note)
+
+	if !houseNumberPattern.MatchString(trimmed) {
+		return nil, nil
+	}
+
+	member, err := u.memberRepo.FindByHouseNumber(ctx, trimmed)
+	if err != nil {
+		return nil, err
+	}
+	if member != nil && member.Status == domain.MemberStatusActive {
+		return member, nil
 	}
 	return nil, nil
 }
