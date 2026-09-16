@@ -66,7 +66,7 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	// ---- CashFlow routes ----
 	cashFlowGroup := api.Group("/cashflow")
 	cashFlowGroup.GET("", h.CashFlow.GetAll, auth, middleware.LogActivity(activityUsecase, "view_cashflow", "cashflow"))
-	cashFlowGroup.GET("/saldo", h.CashFlow.GetSaldo, auth, middleware.LogActivity(activityUsecase, "view_saldo", "cashflow"))
+	cashFlowGroup.GET("/saldo", h.CashFlow.GetSaldo, auth)
 	cashFlowGroup.POST("", h.CashFlow.Create, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
 
 	// ---- Analytics routes ----
