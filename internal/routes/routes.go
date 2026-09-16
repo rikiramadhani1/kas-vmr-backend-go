@@ -54,7 +54,7 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	// auto-confirm worker), so there's nothing left for an admin to
 	// manually approve.
 	paymentGroup := api.Group("/payments")
-	paymentGroup.GET("/count", h.Payment.Count, auth, middleware.LogActivity(activityUsecase, "count_payment", "payment"))
+	paymentGroup.GET("/count", h.Payment.Count, auth)
 	paymentGroup.GET("/recent", h.Payment.GetRecent, auth, middleware.LogActivity(activityUsecase, "view_recent_payments", "payment"))
 	paymentGroup.GET("/unpaid", h.Payment.ListUnpaid, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
 	paymentGroup.GET("/paid-status", h.Payment.GetStatus, auth, middleware.RequireRole(domain.RoleAdmin, domain.RoleBendahara))
