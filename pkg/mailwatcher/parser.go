@@ -90,25 +90,18 @@ func ParseSeaBankTransferEmail(body string) (*Transaction, error) {
 // valueAfterLabel looks at the raw (unfiltered) lines right after a label
 // at index i and returns its value.
 //
-// SeaBank's template always separates "Label" from "Value" with exactly
-// one blank line. When a field (in practice, only "Catatan") is left
-// empty, there are *two or more* consecutive blank lines before the next
-// real content instead - that gap is what distinguishes "this field is
-// genuinely blank" from "here's its value", since otherwise the closing
-// paragraph ("Mohon simpan email ini...") would be wrongly captured as
-// the value of an empty trailing field.
+// SeaBank's HTML template renders a variable number of blank lines
+// between "Label" and "Value" after HTML-tag stripping (each closing
+// tag becomes a newline) - so the separator is "one or more blank
+// lines", not a fixed count. A field is considered genuinely empty only
+// when the next non-blank line is itself a known label (i.e. there was
+// no value line at all before the next field started).
 func valueAfterLabel(lines []string, labelIdx int) (string, bool) {
 	j := labelIdx + 1
-	blankCount := 0
 	for j < len(lines) && strings.TrimSpace(lines[j]) == "" {
-		blankCount++
 		j++
 	}
 	if j >= len(lines) {
-		return "", false
-	}
-	if blankCount != 1 {
-		// Zero blank lines (malformed) or 2+ (field intentionally empty).
 		return "", false
 	}
 

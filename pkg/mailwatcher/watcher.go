@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap-idle"
+	idle "github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-message"
 )
@@ -162,6 +162,9 @@ func (w *Watcher) processUnseen(c *client.Client) error {
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}
+
+	log.Printf("mailwatcher: search found %d unseen message(s)", len(ids))
+
 	if len(ids) == 0 {
 		return nil
 	}
@@ -169,7 +172,7 @@ func (w *Watcher) processUnseen(c *client.Client) error {
 	seqset := new(imap.SeqSet)
 	seqset.AddNum(ids...)
 
-	section := &imap.BodySectionName{}
+	section := &imap.BodySectionName{Peek: true}
 	items := []imap.FetchItem{section.FetchItem()}
 
 	messages := make(chan *imap.Message, 10)

@@ -54,7 +54,8 @@ func (u *NotificationUsecase) Unsubscribe(ctx context.Context, endpoint string) 
 // `go usecase.SendToMember(...)` so it doesn't add latency either.
 func (u *NotificationUsecase) SendToMember(ctx context.Context, memberID uint, payload PushPayload) {
 	if u.vapidPrivate == "" {
-		return // push notifications not configured yet - skip quietly
+		log.Printf("notification: VAPID belum dikonfigurasi, skip kirim ke member %d", memberID)
+		return
 	}
 
 	subs, err := u.pushRepo.FindByMemberID(ctx, memberID)
