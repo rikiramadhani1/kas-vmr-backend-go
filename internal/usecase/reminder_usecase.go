@@ -38,7 +38,7 @@ func (u *ReminderUsecase) RunOnce(ctx context.Context) {
 	for _, m := range unpaid {
 		monthsList := strings.Join(m.MonthsDue, ", ")
 		body := fmt.Sprintf(
-			"Kamu belum bayar iuran untuk %d bulan (%s). Yuk segera dibayar ya!",
+			"Kamu belum bayar iuran untuk %d bulan (%s). Yuk segera dibayar! Jangan sampai menunggak lebih lama lagi.",
 			m.Unpaid, monthsList,
 		)
 		u.notificationUsecase.SendToMember(ctx, m.MemberID, PushPayload{
@@ -50,22 +50,23 @@ func (u *ReminderUsecase) RunOnce(ctx context.Context) {
 	log.Printf("reminder: reminder terkirim ke %d member yang menunggak", len(unpaid))
 }
 
-// StartScheduler blocks (run it in a goroutine) checking once an hour
+// StartScheduler blocks (run it in a goroutine) checking once a minute
 // whether it's time to send the monthly reminder - i.e. today's date
-// matches reminderDay and the current hour matches reminderHour (both in
-// Asia/Jakarta time). Guards against sending more than once on the same
-// day even if the hourly check fires more than once within that hour.
-func (u *ReminderUsecase) StartScheduler(ctx context.Context, reminderDay, reminderHour int) {
+// matches reminderDay and the current time matches reminderHour:reminderMinute
+// (both in Asia/Jakarta time). Guards against sending more than once on
+// the same day even if the per-minute check fires more than once within
+// that same minute.
+func (u *ReminderUsecase) StartScheduler(ctx context.Context, reminderDay, reminderHour, reminderMinute int) {
 	loc, err := time.LoadLocation("Asia/Jakarta")
 	if err != nil {
 		loc = time.UTC
 	}
 
 	lastSentDate := ""
-	ticker := time.NewTicker(30 * time.Minute)
+	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
-	log.Printf("reminder: scheduler aktif, jalan tiap tanggal %d jam %02d:00 WIB", reminderDay, reminderHour)
+	log.Printf("reminder: scheduler aktif, jalan tiap tanggal %d jam %02d:%02d WIB", reminderDay, reminderHour, reminderMinute)
 
 	for {
 		select {
@@ -75,7 +76,7 @@ func (u *ReminderUsecase) StartScheduler(ctx context.Context, reminderDay, remin
 			now := time.Now().In(loc)
 			today := now.Format("2006-01-02")
 
-			if now.Day() == reminderDay && now.Hour() == reminderHour && today != lastSentDate {
+			if now.Day() == reminderDay && now.Hour() == reminderHour && now.Minute() == reminderMinute && today != lastSentDate {
 				u.RunOnce(ctx)
 				lastSentDate = today
 			}

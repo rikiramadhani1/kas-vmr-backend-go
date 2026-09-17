@@ -126,7 +126,7 @@ func main() {
 	}
 
 	if cfg.ReminderEnabled {
-		go reminderUsecase.StartScheduler(workerCtx, cfg.ReminderDay, cfg.ReminderHour)
+    go reminderUsecase.StartScheduler(workerCtx, cfg.ReminderDay, cfg.ReminderHour, cfg.ReminderMinute)
 	} else {
 		log.Println("reminder: disabled (set REMINDER_ENABLED=true to enable monthly dues reminders)")
 	}

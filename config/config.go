@@ -42,6 +42,7 @@ type Config struct {
 	ReminderEnabled bool
 	ReminderDay     int // day of month (Asia/Jakarta) to send the reminder
 	ReminderHour    int // hour of day (0-23, Asia/Jakarta) to send the reminder
+	ReminderMinute  int // minute of hour (0-59, Asia/Jakarta) to send the reminder
 
 	// --- Web Push (VAPID) ---
 	VAPIDPublicKey  string
@@ -84,6 +85,7 @@ func Load() (*Config, error) {
 		ReminderEnabled: getEnvBool("REMINDER_ENABLED", false),
 		ReminderDay:     getEnvInt("REMINDER_DAY", 5),
 		ReminderHour:    getEnvInt("REMINDER_HOUR", 9),
+		ReminderMinute:  getEnvInt("REMINDER_MINUTE", 0),
 
 		VAPIDPublicKey:  os.Getenv("VAPID_PUBLIC_KEY"),
 		VAPIDPrivateKey: os.Getenv("VAPID_PRIVATE_KEY"),
