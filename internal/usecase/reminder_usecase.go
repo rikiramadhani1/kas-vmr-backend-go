@@ -38,7 +38,7 @@ func (u *ReminderUsecase) RunOnce(ctx context.Context) {
 	for _, m := range unpaid {
 		monthsList := strings.Join(m.MonthsDue, ", ")
 		body := fmt.Sprintf(
-			"Kamu belum bayar iuran untuk %d bulan (%s). Yuk segera dibayar! Jangan sampai menunggak lebih lama lagi.",
+			"Kamu belum bayar iuran untuk %d bulan (%s). Yuk segera dibayar! Jangan sampai menunggak lebih lama lagi ya.",
 			m.Unpaid, monthsList,
 		)
 		u.notificationUsecase.SendToMember(ctx, m.MemberID, PushPayload{

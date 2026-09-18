@@ -71,6 +71,7 @@ func main() {
 	)
 	activityUsecase := usecase.NewActivityUsecase(activityRepo, memberRepo)
 	reminderUsecase := usecase.NewReminderUsecase(paymentUsecase, notificationUsecase)
+	reminderHandler := handler.NewReminderHandler(reminderUsecase, cfg.BroadcastSecret)
 
 	// AutoConfirmUsecase is only meaningful when the mail watcher is
 	// enabled, but we still construct it either way and let
@@ -88,6 +89,7 @@ func main() {
 		Payment:  handler.NewPaymentHandler(paymentUsecase, autoConfirmUsecase, cfg.UploadDir),
 		CashFlow: handler.NewCashFlowHandler(cashFlowUsecase),
 		Activity: handler.NewActivityHandler(activityUsecase),
+		Reminder: reminderHandler,
 	}
 
 	// ---- echo setup ----

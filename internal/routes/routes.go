@@ -17,6 +17,7 @@ type Handlers struct {
 	Payment  *handler.PaymentHandler
 	CashFlow *handler.CashFlowHandler
 	Activity *handler.ActivityHandler
+	Reminder  *handler.ReminderHandler
 }
 
 // Register wires up every route under the `/api` prefix.
@@ -79,4 +80,7 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(200, map[string]string{"status": "ok"})
 	})
+
+	// ---- Manual broadcast trigger (curl/cron, secret-protected) ----
+	e.POST("/api/broadcast/reminder", h.Reminder.BroadcastReminder)
 }
