@@ -200,7 +200,7 @@ func (u *PaymentUsecase) RecordTransaction(ctx context.Context, memberID uint, a
 	// "sudah tercatat" for a booking that then gets rolled back by a
 	// later error in the same transaction.
 	if u.notificationUsecase != nil {
-		go u.notificationUsecase.SendToMember(context.Background(), memberID, PushPayload{ // ada "go" nya di depan untuk goroutine
+		_, _ = u.notificationUsecase.SendToMember(ctx, memberID, PushPayload{ // harusnya u.notificationUsecase.SendToMember untuk goroutine
 			Title: "Pembayaran Kas Berhasil",
 			Body: fmt.Sprintf(
 				"Terima kasih! Pembayaran kas untuk %d bulan sudah tercatat, lunas sampai %s.",
