@@ -53,6 +53,7 @@ func (u *ReminderUsecase) RunOnce(ctx context.Context) (map[string]int, error) {
 			PushPayload{
 				Title: "Pengingat Iuran Kas",
 				Body:  body,
+				URL: "/request",
 			},
 		)
 
