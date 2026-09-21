@@ -23,16 +23,21 @@ func NewReminderUsecase(paymentUsecase *PaymentUsecase, notificationUsecase *Not
 
 // RunOnce sends one reminder push to every active member who currently
 // has unpaid months.
-func (u *ReminderUsecase) RunOnce(ctx context.Context) {
+func (u *ReminderUsecase) RunOnce(ctx context.Context) (map[string]int, error) {
 	unpaid, err := u.paymentUsecase.FindUnpaidMembers(ctx)
 	if err != nil {
-		log.Printf("reminder: gagal ambil daftar member menunggak: %v", err)
-		return
+		return nil, err
+	}
+
+	result := map[string]int{
+		"total_unpaid":    len(unpaid),
+		"sent":            0,
+		"no_subscription": 0,
+		"failed":          0,
 	}
 
 	if len(unpaid) == 0 {
-		log.Println("reminder: tidak ada member yang menunggak, tidak ada reminder dikirim")
-		return
+		return result, nil
 	}
 
 	for _, m := range unpaid {
@@ -42,13 +47,28 @@ func (u *ReminderUsecase) RunOnce(ctx context.Context) {
 			m.Unpaid, monthsList,
 		)
 
-		u.notificationUsecase.SendToMember(ctx, m.MemberID, PushPayload{
-			Title: "Pengingat Iuran Kas",
-			Body:  body,
-		})
+		sent, hasSubscription := u.notificationUsecase.SendToMember(
+			ctx,
+			m.MemberID,
+			PushPayload{
+				Title: "Pengingat Iuran Kas",
+				Body:  body,
+			},
+		)
+
+		if !hasSubscription {
+			result["no_subscription"]++
+			continue
+		}
+
+		if sent {
+			result["sent"]++
+		} else {
+			result["failed"]++
+		}
 	}
 
-	log.Printf("reminder: reminder terkirim ke %d member yang menunggak", len(unpaid))
+	return result, nil
 }
 
 // StartScheduler blocks (run it in a goroutine) checking once a minute

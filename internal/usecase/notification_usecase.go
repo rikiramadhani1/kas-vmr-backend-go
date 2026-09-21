@@ -3,7 +3,6 @@ package usecase
 import (
 	"context"
 	"encoding/json"
-	"log"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
@@ -52,27 +51,28 @@ func (u *NotificationUsecase) Unsubscribe(ctx context.Context, endpoint string) 
 // failed push must never fail whatever business operation triggered it
 // (payment recording, reminders, etc). Callers should invoke this via
 // `go usecase.SendToMember(...)` so it doesn't add latency either.
-func (u *NotificationUsecase) SendToMember(ctx context.Context, memberID uint, payload PushPayload) {
+func (u *NotificationUsecase) SendToMember(ctx context.Context, memberID uint, payload PushPayload) (bool, bool) {
 	if u.vapidPrivate == "" {
-		log.Printf("notification: VAPID belum dikonfigurasi, skip kirim ke member %d", memberID)
-		return
+		return false, false
 	}
 
 	subs, err := u.pushRepo.FindByMemberID(ctx, memberID)
 	if err != nil {
-		log.Printf("notification: gagal ambil subscription member %d: %v", memberID, err)
-		return
+		return false, false
+	}
+
+	if len(subs) == 0 {
+		return false, false
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("notification: gagal marshal payload: %v", err)
-		return
+		return false, true
 	}
 
-	for _, sub := range subs {
-		log.Printf("notification: sebelum SendNotification member_id=%d", memberID)
+	sent := false
 
+	for _, sub := range subs {
 		resp, err := webpush.SendNotification(body, &webpush.Subscription{
 			Endpoint: sub.Endpoint,
 			Keys: webpush.Keys{
@@ -87,20 +87,19 @@ func (u *NotificationUsecase) SendToMember(ctx context.Context, memberID uint, p
 		})
 
 		if err != nil {
-			log.Printf("notification: gagal kirim ke endpoint %s: %v", sub.Endpoint, err)
 			continue
 		}
 
-		log.Printf(
-			"notification: SendNotification berhasil member_id=%d status=%d",
-			memberID,
-			resp.StatusCode,
-		)
-
 		resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			sent = true
+		}
 
 		if resp.StatusCode == 404 || resp.StatusCode == 410 {
 			_ = u.pushRepo.DeleteByEndpoint(ctx, sub.Endpoint)
 		}
 	}
+
+	return sent, true
 }

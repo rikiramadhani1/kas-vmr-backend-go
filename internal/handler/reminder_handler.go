@@ -25,6 +25,10 @@ func (h *ReminderHandler) BroadcastReminder(c echo.Context) error {
 		return response.Error(c, "unauthorized", 401)
 	}
 
-	h.reminderUsecase.RunOnce(c.Request().Context())
-	return response.Success(c, "Reminder berhasil dikirim ke member yang menunggak", nil)
+	result, err := h.reminderUsecase.RunOnce(c.Request().Context())
+	if err != nil {
+		return response.Error(c, "gagal mengirim reminder", 500)
+	}
+
+	return response.Success(c, "Reminder selesai diproses", result)
 }
