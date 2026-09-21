@@ -205,7 +205,7 @@ func (u *PaymentUsecase) RecordTransaction(ctx context.Context, memberID uint, a
 			Body: fmt.Sprintf(
 				"Terima kasih! Pembayaran kas untuk %d bulan sudah tercatat, lunas sampai %s.",
 				result.Months, result.PaidUntil,
-			),
+			), URL: "/request",
 		})
 	}
 
