@@ -22,6 +22,7 @@ type Member struct {
 	ChatLogs       []ChatLog      `gorm:"foreignKey:MemberID" json:"-"`
 	UserActivities []UserActivity `gorm:"foreignKey:MemberID" json:"-"`
 	LogSignTfs     []LogSignTf    `gorm:"foreignKey:MemberID" json:"-"`
+	PWAInstallations []PWAInstallation `gorm:"foreignKey:MemberID" json:"-"`
 }
 
 func (Member) TableName() string { return "members" }

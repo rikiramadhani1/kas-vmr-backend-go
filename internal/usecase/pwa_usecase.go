@@ -10,9 +10,9 @@ import (
 )
 
 type RegisterPWAInstallationRequest struct {
-	DeviceID string
-	Platform string
-	Browser  string
+	InstallationID string
+	Platform       string
+	Browser        string
 }
 
 type PWAUsecase struct {
@@ -33,12 +33,12 @@ func (u *PWAUsecase) RegisterInstallation(
 	now := time.Now()
 
 	installation := &domain.PWAInstallation{
-		MemberID:    memberID,
-		DeviceID:    strings.TrimSpace(req.DeviceID),
-		Platform:    strings.TrimSpace(req.Platform),
-		Browser:     strings.TrimSpace(req.Browser),
-		InstalledAt: now,
-		LastSeenAt:  now,
+		MemberID:       memberID,
+		InstallationID: strings.TrimSpace(req.InstallationID),
+		Platform:       strings.TrimSpace(req.Platform),
+		Browser:        strings.TrimSpace(req.Browser),
+		InstalledAt:    now,
+		LastSeenAt:     now,
 	}
 
 	return u.repo.Upsert(ctx, installation)
@@ -49,4 +49,21 @@ func (u *PWAUsecase) GetMemberInstallations(
 	memberID uint,
 ) ([]domain.PWAInstallation, error) {
 	return u.repo.FindByMemberID(ctx, memberID)
+}
+
+func (u *PWAUsecase) HasInstallation(
+	ctx context.Context,
+	memberID uint,
+	installationID string,
+) (bool, error) {
+	installation, err := u.repo.FindByMemberAndInstallationID(
+		ctx,
+		memberID,
+		strings.TrimSpace(installationID),
+	)
+	if err != nil {
+		return false, err
+	}
+
+	return installation != nil, nil
 }

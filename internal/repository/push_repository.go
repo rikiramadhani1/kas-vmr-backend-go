@@ -28,8 +28,16 @@ func NewPushRepository(db *gorm.DB) PushRepository {
 func (r *pushRepository) Save(ctx context.Context, sub *domain.PushSubscription) error {
 	return r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "endpoint"}},
-			DoUpdates: clause.AssignmentColumns([]string{"p256dh", "auth", "member_id"}),
+			Columns: []clause.Column{
+				{Name: "member_id"},
+				{Name: "installation_id"},
+			},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"endpoint",
+				"p256dh",
+				"auth",
+				"updated_at",
+			}),
 		}).
 		Create(sub).Error
 }

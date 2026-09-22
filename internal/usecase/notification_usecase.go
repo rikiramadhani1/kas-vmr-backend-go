@@ -36,9 +36,8 @@ func (u *NotificationUsecase) PublicKey() string {
 	return u.vapidPublic
 }
 
-func (u *NotificationUsecase) Subscribe(ctx context.Context, memberID uint, endpoint, p256dh, auth string) error {
-	return u.pushRepo.Save(ctx, &domain.PushSubscription{
-		MemberID: memberID, Endpoint: endpoint, P256dh: p256dh, Auth: auth,
+func (u *NotificationUsecase) Subscribe(ctx context.Context, memberID uint, installationID, endpoint, p256dh, auth string) error {
+	return u.pushRepo.Save(ctx, &domain.PushSubscription{ MemberID: memberID, InstallationID: installationID, Endpoint: endpoint, P256dh: p256dh, Auth: auth,
 	})
 }
 

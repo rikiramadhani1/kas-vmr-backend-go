@@ -170,7 +170,7 @@ func (h *MemberHandler) SubscribePush(c echo.Context) error {
 		return response.Error(c, "Unauthorized", 401)
 	}
 
-	if err := h.notificationUsecase.Subscribe(c.Request().Context(), memberID, req.Endpoint, req.Keys.P256dh, req.Keys.Auth); err != nil {
+	if err := h.notificationUsecase.Subscribe(c.Request().Context(), memberID, req.InstallationID, req.Endpoint, req.Keys.P256dh, req.Keys.Auth); err != nil {
 		return response.FromError(c, err)
 	}
 	return response.Success(c, "Berhasil subscribe notifikasi", nil)
@@ -213,9 +213,9 @@ func (h *MemberHandler) RegisterPWAInstallation(c echo.Context) error {
 		c.Request().Context(),
 		memberID,
 		usecase.RegisterPWAInstallationRequest{
-			DeviceID: req.DeviceID,
-			Platform: req.Platform,
-			Browser:  req.Browser,
+			InstallationID: req.InstallationID,
+			Platform:       req.Platform,
+			Browser:        req.Browser,
 		},
 	)
 

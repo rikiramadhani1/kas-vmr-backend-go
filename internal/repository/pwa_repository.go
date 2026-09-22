@@ -11,7 +11,7 @@ import (
 type PWARepository interface {
 	Upsert(ctx context.Context, installation *domain.PWAInstallation) error
 	FindByMemberID(ctx context.Context, memberID uint) ([]domain.PWAInstallation, error)
-	CountByMemberID(ctx context.Context, memberID uint) (int64, error)
+	FindByMemberAndInstallationID(ctx context.Context, memberID uint, installationID string) (*domain.PWAInstallation, error)
 }
 
 type pwaRepository struct {
@@ -22,8 +22,8 @@ func NewPWARepository(db *gorm.DB) PWARepository {
 	return &pwaRepository{db: db}
 }
 
-// Upsert menggunakan kombinasi member_id + device_id.
-// Device yang sama tidak akan membuat installation baru.
+// Upsert menggunakan kombinasi member_id + installation_id.
+// Installation yang sama tidak akan membuat row baru.
 func (r *pwaRepository) Upsert(
 	ctx context.Context,
 	installation *domain.PWAInstallation,
@@ -32,7 +32,7 @@ func (r *pwaRepository) Upsert(
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "member_id"},
-				{Name: "device_id"},
+				{Name: "installation_id"},
 			},
 			DoUpdates: clause.AssignmentColumns([]string{
 				"platform",
@@ -58,16 +58,28 @@ func (r *pwaRepository) FindByMemberID(
 	return list, err
 }
 
-func (r *pwaRepository) CountByMemberID(
+func (r *pwaRepository) FindByMemberAndInstallationID(
 	ctx context.Context,
 	memberID uint,
-) (int64, error) {
-	var count int64
+	installationID string,
+) (*domain.PWAInstallation, error) {
+	var installation domain.PWAInstallation
 
 	err := r.db.WithContext(ctx).
-		Model(&domain.PWAInstallation{}).
-		Where("member_id = ?", memberID).
-		Count(&count).Error
+		Where(
+			"member_id = ? AND installation_id = ?",
+			memberID,
+			installationID,
+		).
+		First(&installation).Error
 
-	return count, err
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	return &installation, nil
 }
