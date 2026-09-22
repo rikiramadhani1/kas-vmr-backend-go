@@ -16,10 +16,21 @@ type MemberHandler struct {
 	memberUsecase       *usecase.MemberUsecase
 	adminUsecase        *usecase.AdminUsecase
 	notificationUsecase *usecase.NotificationUsecase
+	pwaUsecase *usecase.PWAUsecase
 }
 
-func NewMemberHandler(memberUsecase *usecase.MemberUsecase, adminUsecase *usecase.AdminUsecase, notificationUsecase *usecase.NotificationUsecase) *MemberHandler {
-	return &MemberHandler{memberUsecase: memberUsecase, adminUsecase: adminUsecase, notificationUsecase: notificationUsecase}
+func NewMemberHandler(
+	memberUsecase *usecase.MemberUsecase, 
+	adminUsecase *usecase.AdminUsecase, 
+	notificationUsecase *usecase.NotificationUsecase,
+	pwaUsecase *usecase.PWAUsecase,
+	) *MemberHandler {
+	return &MemberHandler{
+		memberUsecase: memberUsecase, 
+		adminUsecase: adminUsecase, 
+		notificationUsecase: notificationUsecase, 
+		pwaUsecase: pwaUsecase,
+	}
 }
 
 // Login handles POST /api/auth (member login by phone + PIN).
@@ -179,4 +190,38 @@ func (h *MemberHandler) UnsubscribePush(c echo.Context) error {
 		return response.FromError(c, err)
 	}
 	return response.Success(c, "Berhasil unsubscribe notifikasi", nil)
+}
+
+// RegisterPWAInstallation handles POST /api/members/pwa-install.
+func (h *MemberHandler) RegisterPWAInstallation(c echo.Context) error {
+	var req dto.RegisterPWAInstallationRequest
+
+	if err := c.Bind(&req); err != nil {
+		return response.Error(c, "Payload tidak valid", 400)
+	}
+
+	if err := c.Validate(&req); err != nil {
+		return response.Error(c, err.Error(), 400)
+	}
+
+	memberID, ok := middleware.GetUserID(c)
+	if !ok {
+		return response.Error(c, "Unauthorized", 401)
+	}
+
+	err := h.pwaUsecase.RegisterInstallation(
+		c.Request().Context(),
+		memberID,
+		usecase.RegisterPWAInstallationRequest{
+			DeviceID: req.DeviceID,
+			Platform: req.Platform,
+			Browser:  req.Browser,
+		},
+	)
+
+	if err != nil {
+		return response.FromError(c, err)
+	}
+
+	return response.Success(c, "PWA installation berhasil dicatat", nil)
 }

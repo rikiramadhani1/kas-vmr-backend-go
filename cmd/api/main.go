@@ -59,6 +59,7 @@ func main() {
 	activityRepo := repository.NewActivityRepository(db)
 	emailTxRepo := repository.NewEmailTransactionRepository(db)
 	pushRepo := repository.NewPushRepository(db)
+	pwaRepo := repository.NewPWARepository(db)
 
 	// ---- usecases ----
 	adminUsecase := usecase.NewAdminUsecase(adminRepo, signer, tokens)
@@ -72,6 +73,7 @@ func main() {
 	activityUsecase := usecase.NewActivityUsecase(activityRepo, memberRepo)
 	reminderUsecase := usecase.NewReminderUsecase(paymentUsecase, notificationUsecase)
 	reminderHandler := handler.NewReminderHandler(reminderUsecase, cfg.BroadcastSecret)
+	pwaUsecase := usecase.NewPWAUsecase(pwaRepo)
 
 	// AutoConfirmUsecase is only meaningful when the mail watcher is
 	// enabled, but we still construct it either way and let
@@ -85,7 +87,7 @@ func main() {
 	// ---- handlers ----
 	h := routes.Handlers{
 		Admin:    handler.NewAdminHandler(adminUsecase),
-		Member:   handler.NewMemberHandler(memberUsecase, adminUsecase, notificationUsecase),
+		Member:   handler.NewMemberHandler(memberUsecase, adminUsecase, notificationUsecase, pwaUsecase),
 		Payment:  handler.NewPaymentHandler(paymentUsecase, autoConfirmUsecase, cfg.UploadDir),
 		CashFlow: handler.NewCashFlowHandler(cashFlowUsecase),
 		Activity: handler.NewActivityHandler(activityUsecase),

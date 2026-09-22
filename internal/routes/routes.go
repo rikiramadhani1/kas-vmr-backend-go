@@ -48,6 +48,7 @@ func Register(e *echo.Echo, h Handlers, signer *jwtutil.Signer, activityUsecase 
 	memberGroup.GET("/push-public-key", h.Member.GetPushPublicKey) // public, no auth - FE needs this before subscribing
 	memberGroup.POST("/push-subscribe", h.Member.SubscribePush, auth)
 	memberGroup.POST("/push-unsubscribe", h.Member.UnsubscribePush, auth)
+	memberGroup.POST("/pwa-install", h.Member.RegisterPWAInstallation, auth)
 
 	// ---- Payment routes ----
 	// NOTE: the pending/approve/reject workflow is GONE - every payment is
